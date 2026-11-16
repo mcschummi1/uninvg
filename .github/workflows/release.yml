@@ -1,0 +1,26 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - run: chmod +x gradlew
+      - run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+      - run: cp app/build/outputs/apk/debug/app-debug.apk "UniNVG-${GITHUB_REF_NAME}.apk"
+      - run: gh release create "$GITHUB_REF_NAME" "UniNVG-${GITHUB_REF_NAME}.apk" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
