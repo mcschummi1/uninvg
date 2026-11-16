@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>UniNVG GPU contract tests</title>
+<style>body{background:#090d0c;color:#aeddab;font:16px monospace;padding:32px}canvas{width:256px;height:256px;image-rendering:pixelated}pre{white-space:pre-wrap;line-height:1.7}</style></head>
+<body><h1>UniNVG GPU contract tests</h1><p>Desktop WebGL checks of the actual application shaders. Not a phone-camera test.</p><canvas width="16" height="16"></canvas><pre id="results">Running…</pre>
+<script>
+(async () => {
+    const results = [];
+    const gl = document.querySelector('canvas').getContext('webgl', {preserveDrawingBuffer:true});
+    const shaders = await fetch('/shaders').then(r => r.json());
+    const test = (name, pass) => { results.push({name, pass}); if (!pass) throw Error(name); };
+    try {
+        test('WebGL context available', !!gl);
+        const compile = (type, source) => {
+            const s = gl.createShader(type); gl.shaderSource(s, source); gl.compileShader(s);
+            if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(s));
+            return s;
+        };
+        const programs = {};
+        for (const name of ['COPY','STACK','ENHANCE']) {
+            const p = gl.createProgram(); gl.attachShader(p, compile(gl.VERTEX_SHADER, shaders.VERTEX)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,shaders[name])); gl.linkProgram(p);
+            test(name + ' compiles and links', gl.getProgramParameter(p,gl.LINK_STATUS)); programs[name] = p;
+        }
+        const buffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,0,0,1,-1,1,0,-1,1,0,1,1,1,1,1]),gl.STATIC_DRAW);
+        const flat = (r,g=r,b=r) => Uint8Array.from({length:16*16*4},(_,i)=>[r,g,b,255][i%4]);
+        const makeTexture = (data,unit) => {
+            gl.activeTexture(gl.TEXTURE0+unit); const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
+            gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+            gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,16,16,0,gl.RGBA,gl.UNSIGNED_BYTE,data);return t;
+        };
+        const draw=(name,data,values={},previous=flat(0))=>{
+            const p=programs[name];gl.useProgram(p);
+            const a=gl.getAttribLocation(p,'aPosition'),b=gl.getAttribLocation(p,'aUv');
+            gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,2,gl.FLOAT,false,16,0);gl.enableVertexAttribArray(b);gl.vertexAttribPointer(b,2,gl.FLOAT,false,16,8);
+            gl.uniformMatrix4fv(gl.getUniformLocation(p,'uMatrix'),false,new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]));
+            const source=makeTexture(data,0);gl.uniform1i(gl.getUniformLocation(p,'uSource'),0);
+            const history=makeTexture(previous,1);gl.uniform1i(gl.getUniformLocation(p,'uHistory'),1);
+            const uniforms={uGain:1,uGamma:1,uDenoise:0,uNoise:.01,uWeight:0,uThreshold:.075,...values};
+            for(const [key,value] of Object.entries(uniforms)) gl.uniform1f(gl.getUniformLocation(p,key),value);
+            gl.uniform1i(gl.getUniformLocation(p,'uPalette'),values.palette||0);
+            gl.uniform2f(gl.getUniformLocation(p,'uTexel'),1/16,1/16);
+            for(let row=0;row<4;row++) gl.uniform4fv(gl.getUniformLocation(p,'uRow'+row),new Float32Array(4).fill(values.region??1));
+            gl.viewport(0,0,16,16);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+            const out=new Uint8Array(16*16*4);gl.readPixels(0,0,16,16,gl.RGBA,gl.UNSIGNED_BYTE,out);
+            gl.deleteTexture(source);gl.deleteTexture(history);return out;
+        };
+        let out=draw('ENHANCE',flat(64,128,240));
+        test('Natural at unity preserves RGB',Math.abs(out[0]-64)<=1&&Math.abs(out[1]-128)<=1&&Math.abs(out[2]-240)<=1);
+        out=draw('ENHANCE',flat(0),{uGain:16,uGamma:2});test('No invented signal from black',out[0]===0&&out[1]===0&&out[2]===0);
+        out=draw('ENHANCE',flat(4),{uGain:16});test('Dark signal is lifted',out[0]>40);
+        out=draw('ENHANCE',flat(255),{uGain:16});test('Highlight endpoint stays white',out[0]===255);
+        const natural=draw('ENHANCE',flat(100));
+        const colors=[];for(let p=1;p<=4;p++)colors.push(draw('ENHANCE',flat(100),{palette:p}).slice(0,3));
+        test('Green phosphor is green dominant',colors[0][1]>colors[0][0]&&colors[0][1]>colors[0][2]);
+        test('White phosphor is near-neutral',Math.max(...colors[1])-Math.min(...colors[1])<10);
+        test('Red phosphor is red dominant',colors[2][0]>colors[2][1]*4);
+        test('Ice phosphor is blue-white',colors[3][2]>colors[3][1]&&colors[3][1]>colors[3][0]);
+        out=draw('ENHANCE',flat(100),{region:.5});test('Regional mode attenuates instead of globally brightening',out[0]<natural[0]);
+        out=draw('STACK',flat(80),{uWeight:.75},flat(84));test('Stable neighboring frames accumulate',out[0]>80&&out[0]<=84);
+        out=draw('STACK',flat(220),{uWeight:.9},flat(10));test('Large motion rejects stale history',out[0]===220);
+        out=draw('STACK',flat(80),{uWeight:0},flat(255));test('Reset removes source history',out[0]===80);
+        test('No GPU errors',gl.getError()===gl.NO_ERROR);
+    } catch (error) { results.push({name:error.message,pass:false}); }
+    window.testResults=results;
+    document.getElementById('results').textContent=results.map(r=>(r.pass?'PASS ':'FAIL ')+r.name).join('\n');
+})();
+</script></body></html>

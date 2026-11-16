@@ -1,0 +1,853 @@
+package dev.uninvg
+
+import android.Manifest
+import android.app.Activity
+import android.app.AlertDialog
+import android.app.Dialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.SurfaceTexture
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.hardware.display.DisplayManager
+import android.net.Uri
+import android.opengl.GLSurfaceView
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.Surface
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Switch
+import android.widget.TextView
+import android.widget.Toast
+import dev.uninvg.camera.CameraEngine
+import dev.uninvg.camera.CameraInfo
+import dev.uninvg.core.*
+import dev.uninvg.media.MediaSource
+import dev.uninvg.media.SnapshotWriter
+import dev.uninvg.render.NightRenderer
+import dev.uninvg.render.CameraOrientation
+import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.pow
+
+class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, MediaSource.Listener {
+    private val ink = Color.rgb(9, 13, 12)
+    private val panel = Color.rgb(19, 26, 23)
+    private val accent = Color.rgb(174, 221, 171)
+    private val primary = Color.rgb(235, 242, 236)
+    private val secondary = Color.rgb(143, 163, 152)
+    private val main = Handler(Looper.getMainLooper())
+    private val analysis = Executors.newSingleThreadExecutor()
+    private val io = Executors.newSingleThreadExecutor()
+    private val analyzing = AtomicBoolean()
+    private val controller = AutoController()
+    private val captures = LinkedHashMap<Long, CaptureMetadata>()
+    private data class PendingSample(val luma: FloatArray, val width: Int, val height: Int, val timestampNs: Long, val epoch: Int)
+    private var pendingSample: PendingSample? = null
+    private lateinit var camera: CameraEngine
+    private lateinit var media: MediaSource
+    private lateinit var gl: GLSurfaceView
+    private lateinit var renderer: NightRenderer
+    private lateinit var root: FrameLayout
+    private lateinit var gearButton: android.widget.ImageButton
+    private lateinit var status: TextView
+    private lateinit var sceneLabel: TextView
+    private lateinit var placeholder: LinearLayout
+    private lateinit var placeholderText: TextView
+    private lateinit var permissionButton: Button
+    private var lightSwitch: Switch? = null
+    private lateinit var snapshotButton: Button
+    private lateinit var sourceButton: Button
+    private lateinit var playButton: Button
+    private lateinit var panelContent: LinearLayout
+    private lateinit var tabRow: LinearLayout
+    private var selectedTab = 0
+    private var settingsDialog: Dialog? = null
+    private var settingsScroll: ScrollView? = null
+    private val displayManager by lazy { getSystemService(DISPLAY_SERVICE) as DisplayManager }
+    private var lastDisplayDegrees = -1
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+        override fun onDisplayRemoved(displayId: Int) = Unit
+        override fun onDisplayChanged(displayId: Int) {
+            if (resumed && windowManager.defaultDisplay.displayId == displayId) refreshCameraOrientation()
+        }
+    }
+    private var settings = NvSettings()
+    private var enhancement = Enhancement()
+    private var cameraInfo: CameraInfo? = null
+    private var texture: SurfaceTexture? = null
+    private var activeUri: Uri? = null
+    private var resumed = false
+    private var isVideo = false
+    private var exposureProduct = 10_000_000.0 * 100
+    private var measured: CaptureMetadata? = null
+    private var scene = SceneKind.DARK
+    private var lastOutputTimestamp = 0L
+    private var smoothedFps = 0.0
+    private var lastStatusUpdate = 0L
+    @Volatile private var analysisEpoch = 0
+    private var lastPhotoSample: FloatArray? = null
+    private var pendingSnapshot: Bitmap? = null
+    private var snapshotWriting = false
+    private var sourceHasFrame = false
+    private var lastCameraError: String? = null
+    private val preferences by lazy { getSharedPreferences("controls", MODE_PRIVATE) }
+    private val identity by lazy {
+        DeviceIdentity(Build.MANUFACTURER, Build.MODEL, if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL else "")
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        settings = restoreSettings()
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        camera = CameraEngine(this, this)
+        media = MediaSource(this, this)
+        buildUi()
+        activeUri = savedInstanceState?.getString("source")?.let(Uri::parse)
+    }
+
+    private fun buildUi() {
+        root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        setContentView(root)
+        gl = object : GLSurfaceView(this) {
+            private var tap: Pair<Float, Float>? = null
+            override fun onTouchEvent(event: MotionEvent): Boolean {
+                if (event.action == MotionEvent.ACTION_UP) {
+                    tap = event.x to event.y
+                    performClick()
+                } else if (event.action == MotionEvent.ACTION_CANCEL) tap = null
+                return true
+            }
+            override fun performClick(): Boolean {
+                super.performClick()
+                val position = tap ?: (width / 2f to height / 2f)
+                focusAt(position.first, position.second)
+                tap = null
+                return true
+            }
+        }.apply {
+            setEGLContextClientVersion(2)
+            preserveEGLContextOnPause = true
+            contentDescription = "Camera viewfinder. Activate to focus."
+        }
+        renderer = NightRenderer(gl, this)
+        gl.setRenderer(renderer)
+        gl.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+        root.addView(gl, FrameLayout.LayoutParams(-1, -1))
+        val hud = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sceneLabel = text("LOW-LIGHT OPTICS", 10f, accent).apply {
+            letterSpacing = 0.12f
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            background = rounded(Color.argb(150, 0, 0, 0), 16)
+        }
+        hud.addView(sceneLabel, LinearLayout.LayoutParams(-2, -2))
+        status = text("Camera idle", 10f, accent).apply {
+            typeface = Typeface.MONOSPACE; maxLines = 2
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = rounded(Color.argb(150, 0, 0, 0), 16)
+        }
+        hud.addView(status, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
+        root.addView(hud, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
+            topMargin = dp(12); marginStart = dp(12)
+        })
+        gearButton = android.widget.ImageButton(this).apply {
+            setImageResource(R.drawable.ic_gear)
+            contentDescription = "Settings"
+            background = rounded(Color.argb(150, 0, 0, 0), 20)
+            setOnClickListener { showSettings() }
+        }
+        root.addView(gearButton, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP or Gravity.END).apply {
+            topMargin = dp(12); marginEnd = dp(12)
+        })
+        placeholder = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
+        placeholderText = text("Ready when you are", 18f, primary).apply { gravity = Gravity.CENTER }
+        placeholder.addView(placeholderText)
+        permissionButton = button("Enable camera") { requestCamera() }
+        placeholder.addView(permissionButton, LinearLayout.LayoutParams(-2, dp(48)).apply { topMargin = dp(16) })
+        root.addView(placeholder, FrameLayout.LayoutParams(-1, -1))
+        playButton = button("Pause") { playButton.text = if (media.togglePlayback()) "Pause" else "Play" }.apply { visibility = View.GONE }
+        root.addView(playButton, FrameLayout.LayoutParams(dp(84), dp(44), Gravity.BOTTOM or Gravity.END).apply {
+            bottomMargin = dp(68); marginEnd = dp(12)
+        })
+        val footer = row()
+        sourceButton = button("Import") { chooseSource() }.apply { background = rounded(Color.argb(170, 10, 16, 13), 22) }
+        snapshotButton = button("Save frame") { renderer.snapshot() }.apply {
+            setTextColor(ink); background = rounded(accent, 22); isEnabled = false
+        }
+        footer.addView(sourceButton, LinearLayout.LayoutParams(-2, dp(44)).apply { marginEnd = dp(10) })
+        footer.addView(snapshotButton, LinearLayout.LayoutParams(-2, dp(44)))
+        root.addView(footer, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(14)
+        })
+        applyHudColor()
+        updateButtons()
+    }
+
+    private fun hudColor(): Int = when (settings.palette) {
+        Palette.GREEN -> Color.rgb(255, 92, 80)
+        Palette.RED -> Color.rgb(126, 232, 130)
+        Palette.WHITE -> Color.rgb(126, 232, 130)
+        Palette.ICE -> Color.rgb(255, 164, 64)
+        Palette.NATURAL -> Color.rgb(126, 232, 130)
+    }
+
+    private fun applyHudColor() {
+        val color = hudColor()
+        sceneLabel.setTextColor(color)
+        status.setTextColor(color)
+        gearButton.setColorFilter(color)
+    }
+
+    private fun hideSystemBars() {
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+            or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) hideSystemBars()
+    }
+
+    private fun showSettings() {
+        if (settingsDialog?.isShowing == true) return
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+        val sheet = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(16))
+        }
+        val header = row()
+        header.addView(text("Settings", 20f, primary), LinearLayout.LayoutParams(0, dp(52), 1f))
+        header.addView(button("Done") { dialog.dismiss() }, LinearLayout.LayoutParams(dp(76), dp(48)))
+        sheet.addView(header)
+        tabRow = row()
+        listOf("Image", "Capture", "Color", "Display").forEachIndexed { index, title ->
+            tabRow.addView(button(title) { showTab(index) }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        }
+        sheet.addView(tabRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        panelContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        settingsScroll = ScrollView(this).apply {
+            addView(panelContent)
+            isVerticalScrollBarEnabled = true
+        }
+        sheet.addView(settingsScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        dialog.setContentView(sheet)
+        dialog.setOnDismissListener {
+            settingsDialog = null
+            settingsScroll = null
+            lightSwitch = null
+            hideSystemBars()
+        }
+        settingsDialog = dialog
+        showTab(selectedTab)
+        dialog.show()
+        sizeSettings()
+    }
+
+    private fun sizeSettings() {
+        val metrics = resources.displayMetrics
+        settingsDialog?.window?.apply {
+            setBackgroundDrawable(rounded(panel, 22))
+            setDimAmount(0.35f)
+            setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+            attributes = attributes.apply { y = dp(12) }
+            setLayout(min(metrics.widthPixels - dp(24), dp(480)), min((metrics.heightPixels * 0.8f).toInt(), dp(740)))
+            @Suppress("DEPRECATION")
+            decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+        }
+    }
+
+    private fun showTab(index: Int) {
+        selectedTab = index
+        for (i in 0 until tabRow.childCount) {
+            (tabRow.getChildAt(i) as Button).apply {
+                isSelected = i == index
+                setTextColor(if (i == index) accent else secondary)
+                background = rounded(if (i == index) Color.rgb(35, 47, 40) else Color.TRANSPARENT, 12)
+            }
+        }
+        panelContent.removeAllViews()
+        when (index) {
+            0 -> {
+                toggle("Automatic", settings.automatic) { changeSettings(settings.copy(automatic = it)) }
+                slider("Exposure", settings.exposureBias, -2f, 2f, { String.format(Locale.US, "%+.1f EV", it) }) {
+                    changeSettings(settings.copy(exposureBias = it))
+                }
+                slider("Digital gain", settings.digitalGain, 1f, 16f, { String.format(Locale.US, "%.1f×", it) }) {
+                    changeSettings(settings.copy(digitalGain = it))
+                }
+                slider("Gamma", settings.gamma, 0.5f, 2.5f, { String.format(Locale.US, "%.2f", it) }) {
+                    changeSettings(settings.copy(gamma = it))
+                }
+                slider("Denoise", settings.denoise, 0f, 1f, { "${(it * 100).toInt()}%" }) {
+                    changeSettings(settings.copy(denoise = it))
+                }
+                toggle("Regional light · Experimental", settings.regional) { changeSettings(settings.copy(regional = it)) }
+            }
+            1 -> {
+                section("TARGET FRAME RATE")
+                chips(SUPPORTED_FPS.map { fpsLabel(it) }, SUPPORTED_FPS.indexOf(settings.fps)) { position ->
+                    changeSettings(settings.copy(fps = SUPPORTED_FPS[position]))
+                }
+                section("TEMPORAL DENOISE")
+                val limit = cameraInfo?.profile?.maxStackDepth ?: 8
+                val depths = listOf(1, 2, 4, 8, 16).filter { it <= limit }
+                chips(depths.map { if (it == 1) "Off" else "${it}×" }, depths.indexOf(settings.stackDepth)) { position ->
+                    changeSettings(settings.copy(stackDepth = depths[position]))
+                }
+                section("CAMERA")
+                lightSwitch = toggle("Light", settings.torch) { changeSettings(settings.copy(torch = it)) }
+                panelContent.addView(button("Camera capabilities") { showDiagnostics() }, LinearLayout.LayoutParams(-1, dp(48)))
+            }
+            2 -> {
+                section("PHOSPHOR")
+                chips(Palette.entries.map { it.label }, settings.palette.ordinal) { position ->
+                    changeSettings(settings.copy(palette = Palette.entries[position]))
+                }
+            }
+            3 -> {
+                toggle("Cardboard split view", settings.vr) { changeSettings(settings.copy(vr = it)) }
+                section("RESOLUTION")
+                chips(SUPPORTED_RESOLUTIONS.map { if (it == 2160) "4K" else "${it}p" }, SUPPORTED_RESOLUTIONS.indexOf(settings.resolution)) { position ->
+                    changeSettings(settings.copy(resolution = SUPPORTED_RESOLUTIONS[position]))
+                }
+            }
+        }
+        updateButtons()
+        settingsScroll?.post { settingsScroll?.scrollTo(0, 0) }
+    }
+
+    private fun section(title: String) {
+        panelContent.addView(text(title, 10f, secondary).apply {
+            letterSpacing = 0.1f; setPadding(dp(4), dp(14), 0, dp(6))
+        })
+    }
+
+    private fun toggle(title: String, checked: Boolean, update: (Boolean) -> Unit): Switch {
+        val toggle = Switch(this).apply {
+            text = title; textSize = 13f; setTextColor(primary); isChecked = checked
+            minHeight = dp(48)
+            setPadding(dp(4), 0, dp(4), 0)
+            setOnCheckedChangeListener { _, value -> update(value) }
+        }
+        panelContent.addView(toggle, LinearLayout.LayoutParams(-1, dp(48)))
+        return toggle
+    }
+
+    private fun slider(title: String, value: Float, low: Float, high: Float, format: (Float) -> String, update: (Float) -> Unit) {
+        val labels = row()
+        labels.addView(text(title, 12f, primary), LinearLayout.LayoutParams(0, dp(24), 1f))
+        val current = text(format(value), 12f, accent).apply { gravity = Gravity.END or Gravity.CENTER_VERTICAL }
+        labels.addView(current)
+        panelContent.addView(labels)
+        panelContent.addView(SeekBar(this).apply {
+            max = 200
+            progress = ((value - low) / (high - low) * 200).toInt()
+            contentDescription = title
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, position: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    val next = low + position / 200f * (high - low)
+                    current.text = format(next)
+                    update(next)
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+            })
+        }, LinearLayout.LayoutParams(-1, dp(48)))
+    }
+
+    private fun chips(labels: List<String>, selected: Int, select: (Int) -> Unit) {
+        val choices = row()
+        labels.forEachIndexed { index, label ->
+            choices.addView(button(label) {
+                select(index)
+                for (position in 0 until choices.childCount) {
+                    (choices.getChildAt(position) as Button).apply {
+                        isSelected = position == index
+                        setTextColor(if (isSelected) ink else primary)
+                        background = rounded(if (isSelected) accent else Color.rgb(31, 40, 35), 12)
+                    }
+                }
+            }.apply {
+                isSelected = index == selected
+                setTextColor(if (isSelected) ink else primary)
+                background = rounded(if (isSelected) accent else Color.rgb(31, 40, 35), 12)
+                minWidth = dp(48)
+            }, LinearLayout.LayoutParams(-2, dp(48)).apply { marginEnd = dp(6) })
+        }
+        panelContent.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(choices) })
+    }
+
+    private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private fun text(label: String, size: Float, color: Int) = TextView(this).apply {
+        text = label; textSize = size; setTextColor(color); gravity = Gravity.CENTER_VERTICAL
+        includeFontPadding = false
+    }
+    private fun button(label: String, click: () -> Unit) = object : Button(this) {
+        override fun setEnabled(enabled: Boolean) {
+            super.setEnabled(enabled)
+            alpha = if (enabled) 1f else 0.4f
+        }
+    }.apply {
+        text = label; textSize = 13f; isAllCaps = false; minWidth = 0; minimumWidth = 0; minHeight = dp(48)
+        setTextColor(primary); background = rounded(Color.rgb(24, 33, 28), 14)
+        setPadding(dp(12), 0, dp(12), 0)
+        setOnClickListener { click() }
+    }
+    private fun rounded(color: Int, radius: Int) = GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    private fun changeSettings(next: NvSettings) {
+        val resolutionChanged = next.resolution != settings.resolution
+        val reanalyze = next.automatic != settings.automatic || next.exposureBias != settings.exposureBias || next.regional != settings.regional || next.digitalGain != settings.digitalGain
+        settings = next
+        if (reanalyze) {
+            analysis.execute { controller.reset() }
+            if (activeUri != null && !isVideo) lastPhotoSample?.let { onSample(it, 64, 64, System.nanoTime()) }
+        }
+        renderer.update(settings, enhancement)
+        if (activeUri == null) {
+            if (resolutionChanged) startSource()
+            else {
+                val product = if (settings.automatic) exposureProduct else manualExposure()
+                camera.update(settings, product)
+            }
+        }
+        preferences.edit().putFloat("fps", settings.fps).putBoolean("automatic", settings.automatic)
+            .putFloat("bias", settings.exposureBias).putFloat("gain", settings.digitalGain).putFloat("gamma", settings.gamma)
+            .putFloat("denoise", settings.denoise).putInt("stack", settings.stackDepth).putInt("palette", settings.palette.ordinal)
+            .putBoolean("regional", settings.regional).putInt("resolution", settings.resolution).putBoolean("vr", settings.vr).apply()
+        applyHudColor()
+        updateStatus()
+        updateButtons()
+    }
+
+    private fun manualExposure(): Double {
+        val caps = cameraInfo?.caps ?: return exposureProduct
+        val budget = min(caps.exposureMaxNs, frameBudgetNs(settings.fps)).toDouble()
+        return budget * caps.analogCeiling * 2.0.pow(settings.exposureBias.toDouble())
+    }
+
+    private fun restoreSettings(): NvSettings = try {
+        NvSettings(fps = try { preferences.getFloat("fps", 15f) } catch (_: ClassCastException) { preferences.getInt("fps", 15).toFloat() },
+            resolution = preferences.getInt("resolution", 720), vr = preferences.getBoolean("vr", false),
+            automatic = preferences.getBoolean("automatic", true), exposureBias = preferences.getFloat("bias", 0f),
+            digitalGain = preferences.getFloat("gain", 1f), gamma = preferences.getFloat("gamma", 1f),
+            denoise = preferences.getFloat("denoise", 0.45f), stackDepth = preferences.getInt("stack", 4),
+            palette = Palette.entries[preferences.getInt("palette", 1)], regional = preferences.getBoolean("regional", false))
+    } catch (error: RuntimeException) { NvSettings() }
+
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        gl.onResume()
+        hideSystemBars()
+        displayManager.registerDisplayListener(displayListener, main)
+        startSource()
+        refreshCameraOrientation()
+    }
+
+    override fun onPause() {
+        resumed = false
+        displayManager.unregisterDisplayListener(displayListener)
+        camera.stop()
+        media.stop()
+        invalidateAnalysis()
+        gl.onPause()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        settingsDialog?.dismiss()
+        camera.release()
+        media.release()
+        analysis.shutdownNow()
+        io.shutdown()
+        if (!snapshotWriting) pendingSnapshot?.recycle()
+        pendingSnapshot = null
+        super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(state: Bundle) {
+        state.putString("source", activeUri?.toString())
+        super.onSaveInstanceState(state)
+    }
+
+    override fun onConfigurationChanged(configuration: Configuration) {
+        super.onConfigurationChanged(configuration)
+        sizeSettings()
+        refreshCameraOrientation()
+    }
+
+    override fun onSurface(texture: SurfaceTexture) {
+        if (isFinishing || isDestroyed) return
+        this.texture = texture
+        startSource()
+    }
+
+    private fun startSource() {
+        val surface = texture ?: return
+        if (!resumed) return
+        invalidateAnalysis()
+        sourceHasFrame = false
+        snapshotButton.isEnabled = false
+        renderer.resetHistory()
+        renderer.update(settings, enhancement)
+        activeUri?.let { uri ->
+            showPlaceholder("Opening file…", false)
+            media.stop()
+            camera.stop {
+                if (resumed && activeUri == uri && texture === surface) media.open(uri, surface)
+            }
+        } ?: run {
+            media.stop()
+            isVideo = false
+            playButton.visibility = View.GONE
+            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                showPlaceholder("Opening camera…", false)
+                camera.start(surface, identity, settings)
+            } else showPlaceholder("See further into the dark", true)
+        }
+        updateButtons()
+    }
+
+    private fun invalidateAnalysis() {
+        analysisEpoch++
+        lastPhotoSample = null
+        captures.clear()
+        pendingSample = null
+        measured = null
+        smoothedFps = 0.0
+        lastOutputTimestamp = 0
+        lastStatusUpdate = 0
+        enhancement = Enhancement()
+        analysis.execute { controller.reset() }
+    }
+
+    private fun requestCamera() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) { startSource(); return }
+        if (preferences.getBoolean("permissionAsked", false) && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        } else {
+            preferences.edit().putBoolean("permissionAsked", true).apply()
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grants: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grants)
+        if (requestCode == CAMERA_PERMISSION) {
+            if (grants.firstOrNull() == PackageManager.PERMISSION_GRANTED) startSource()
+            else showPlaceholder("Camera access is off", true)
+        }
+    }
+
+    override fun onReady(info: CameraInfo) {
+        if (!resumed || activeUri != null) return
+        cameraInfo = info
+        lastCameraError = null
+        configureCameraSource(info)
+        renderer.setProfile(info.profile.maxStackDepth, info.profile.motionThreshold)
+        if (settings.stackDepth > info.profile.maxStackDepth) settings = settings.copy(stackDepth = info.profile.maxStackDepth)
+        exposureProduct = 10_000_000L.coerceIn(info.caps.exposureMinNs, info.caps.exposureMaxNs).toDouble() * info.caps.isoMin
+        camera.update(settings, if (settings.automatic) exposureProduct else manualExposure())
+        updateButtons()
+        if (settingsDialog?.isShowing == true) showTab(selectedTab)
+    }
+
+    private fun displayDegrees(): Int = when (windowManager.defaultDisplay.rotation) {
+        Surface.ROTATION_90 -> 90
+        Surface.ROTATION_180 -> 180
+        Surface.ROTATION_270 -> 270
+        else -> 0
+    }
+
+    private fun cameraOrientation(info: CameraInfo) = CameraOrientation(info.sensorOrientation, displayDegrees(), info.frontFacing)
+
+    private fun configureCameraSource(info: CameraInfo) {
+        val orientation = cameraOrientation(info)
+        lastDisplayDegrees = orientation.displayDegrees
+        renderer.configureCamera(info.width, info.height, orientation)
+    }
+
+    private fun refreshCameraOrientation() {
+        if (activeUri != null || displayDegrees() == lastDisplayDegrees) return
+        cameraInfo?.let {
+            invalidateAnalysis()
+            configureCameraSource(it)
+            renderer.update(settings, enhancement)
+        }
+    }
+
+    override fun onCapture(metadata: CaptureMetadata) {
+        if (!resumed || activeUri != null) return
+        captures[metadata.timestampNs] = metadata
+        while (captures.size > 120) captures.remove(captures.keys.first())
+        measured = metadata
+        pendingSample?.takeIf { it.timestampNs == metadata.timestampNs && it.epoch == analysisEpoch }?.let {
+            pendingSample = null
+            onSample(it.luma, it.width, it.height, it.timestampNs)
+        }
+    }
+
+    override fun onSample(luma: FloatArray, width: Int, height: Int, timestampNs: Long) {
+        val sampleEpoch = analysisEpoch
+        main.post {
+            if (!resumed || sampleEpoch != analysisEpoch) return@post
+            if (activeUri == null && cameraInfo?.caps?.manualSensor == true && captures[timestampNs] == null) {
+                pendingSample = PendingSample(luma, width, height, timestampNs, sampleEpoch)
+                return@post
+            }
+            if (!analyzing.compareAndSet(false, true)) return@post
+            if (activeUri != null && !isVideo) lastPhotoSample = luma
+            val epoch = analysisEpoch
+            val capturedSettings = settings
+            val info = cameraInfo
+            val fileMode = activeUri != null
+            val stillImage = fileMode && !isVideo
+            val metadata = if (fileMode) null else captures[timestampNs]
+            val plan = if (fileMode || info == null) CapturePlan(false, 1, 100, frameBudgetNs(settings.fps), null, settings.fps, false, true)
+                else ExposurePlanner.plan(info.caps, settings, exposureProduct)
+            analysis.execute {
+                try {
+                    val stats = SceneAnalyzer.analyze(luma, width, height)
+                    val decision = controller.update(stats, metadata, plan, capturedSettings, timestampNs, stillImage)
+                    main.post {
+                        if (epoch != analysisEpoch || !resumed) return@post
+                        scene = stats.kind
+                        enhancement = decision.enhancement
+                        if (!fileMode && info != null && settings.automatic && metadata != null) {
+                            val changed = abs(kotlin.math.ln(decision.exposureProduct / exposureProduct)) > 0.06
+                            exposureProduct = decision.exposureProduct
+                            if (changed) camera.update(settings, exposureProduct)
+                        }
+                        renderer.update(settings, enhancement)
+                        if (fileMode && !isVideo) frameReady()
+                        updateStatus()
+                    }
+                } catch (error: RuntimeException) {
+                    android.util.Log.e("UniNVG.Analysis", "operation=analyze", error)
+                    main.post { if (epoch == analysisEpoch) toast("Scene analysis unavailable") }
+                } finally { analyzing.set(false) }
+            }
+        }
+    }
+
+    override fun onOutput(timestampNs: Long) {
+        if (!resumed) return
+        frameReady()
+        if (lastOutputTimestamp > 0 && timestampNs > lastOutputTimestamp) {
+            val fps = 1_000_000_000.0 / (timestampNs - lastOutputTimestamp)
+            smoothedFps = if (smoothedFps == 0.0) fps else smoothedFps * 0.8 + fps * 0.2
+        }
+        lastOutputTimestamp = timestampNs
+        if (timestampNs - lastStatusUpdate >= 500_000_000 || lastStatusUpdate == 0L) {
+            lastStatusUpdate = timestampNs
+            updateStatus()
+        }
+    }
+
+    private fun frameReady() {
+        sourceHasFrame = true
+        placeholder.visibility = View.GONE
+        snapshotButton.isEnabled = pendingSnapshot == null
+    }
+
+    private fun updateStatus() {
+        val fps = if (smoothedFps > 0) String.format(Locale.US, "%.1f", smoothedFps) else "—"
+        val iso = measured?.iso?.toString() ?: "—"
+        val exposure = measured?.exposureNs?.let { String.format(Locale.US, "%.1f ms", it / 1_000_000.0) } ?: "—"
+        status.text = if (activeUri != null) {
+            if (isVideo) "FILE · $fps fps  /  ${fpsLabel(settings.fps)} target" else "PHOTO · ${settings.palette.label.uppercase(Locale.US)}"
+        } else "$fps fps / ${fpsLabel(settings.fps)} target   ·   ISO $iso   ·   $exposure"
+        sceneLabel.text = (if (settings.automatic) scene.label else "Manual") + if (settings.regional) " · REGIONAL" else ""
+    }
+
+    override fun onError(message: String) {
+        if (!resumed || activeUri != null) return
+        sourceHasFrame = false
+        snapshotButton.isEnabled = false
+        lastCameraError = message
+        showPlaceholder("Camera unavailable", true)
+        permissionButton.text = "Retry camera"
+        status.text = "Camera unavailable"
+    }
+
+    override fun onRenderError(message: String) {
+        toast(message)
+        if (!sourceHasFrame) showPlaceholder(message, false)
+    }
+
+    private fun showPlaceholder(message: String, action: Boolean) {
+        placeholder.visibility = View.VISIBLE
+        placeholderText.text = message
+        permissionButton.text = "Enable camera"
+        permissionButton.visibility = if (action) View.VISIBLE else View.GONE
+    }
+
+    private fun updateButtons() {
+        lightSwitch?.apply {
+            isEnabled = activeUri == null && cameraInfo?.hasFlash == true
+            alpha = if (isEnabled) 1f else 0.4f
+            if (isChecked != settings.torch) isChecked = settings.torch
+        }
+        sourceButton.text = if (activeUri == null) "Import" else "Source"
+    }
+
+    private fun chooseSource() {
+        if (activeUri == null) importFile()
+        else AlertDialog.Builder(this).setItems(arrayOf("Live camera", "Open file")) { _, which ->
+            if (which == 0) { activeUri = null; startSource() } else importFile()
+        }.show()
+    }
+
+    private fun importFile() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+        }
+        try { startActivityForResult(intent, OPEN_FILE) }
+        catch (error: android.content.ActivityNotFoundException) { toast("No file picker available") }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == OPEN_FILE && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            if (uri.scheme != "content") { toast("Choose a local media file"); return }
+            try {
+                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            } catch (error: SecurityException) {
+                android.util.Log.w("UniNVG.Media", "operation=persist_uri permission=temporary", error)
+            }
+            activeUri = uri
+            settings = settings.copy(torch = false)
+            startSource()
+        } else if (requestCode == SAVE_FILE) {
+            val bitmap = pendingSnapshot ?: return
+            if (resultCode == RESULT_OK && data?.data != null) saveBitmap(bitmap, data.data)
+            else { bitmap.recycle(); pendingSnapshot = null; snapshotButton.isEnabled = sourceHasFrame }
+        }
+    }
+
+    override fun onPhoto(bitmap: Bitmap) {
+        isVideo = false
+        playButton.visibility = View.GONE
+        renderer.showBitmap(bitmap)
+        updateStatus()
+    }
+
+    override fun onVideo(width: Int, height: Int) {
+        isVideo = true
+        val scale = min(1f, 1280f / max(width, height))
+        renderer.configureSource(max(1, (width * scale).toInt()), max(1, (height * scale).toInt()), 0)
+        playButton.visibility = View.VISIBLE
+        playButton.text = "Pause"
+    }
+
+    override fun onMediaError(message: String) {
+        toast(message)
+        activeUri = null
+        startSource()
+    }
+
+    override fun onSnapshot(bitmap: Bitmap) {
+        if (isDestroyed || pendingSnapshot != null) { bitmap.recycle(); return }
+        pendingSnapshot = bitmap
+        snapshotButton.isEnabled = false
+        if (Build.VERSION.SDK_INT >= 29) saveBitmap(bitmap)
+        else {
+            try {
+                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE); type = "image/png"; putExtra(Intent.EXTRA_TITLE, SnapshotWriter.fileName())
+                }, SAVE_FILE)
+            } catch (error: android.content.ActivityNotFoundException) {
+                bitmap.recycle(); pendingSnapshot = null; snapshotButton.isEnabled = sourceHasFrame; toast("No save picker available")
+            }
+        }
+    }
+
+    private fun saveBitmap(bitmap: Bitmap, destination: Uri? = null) {
+        snapshotWriting = true
+        snapshotButton.text = "Saving…"
+        io.execute {
+            val result = runCatching { SnapshotWriter.save(this, bitmap, destination) }
+            bitmap.recycle()
+            main.post {
+                pendingSnapshot = null
+                snapshotWriting = false
+                if (!isDestroyed) {
+                    snapshotButton.text = "Save frame"
+                    snapshotButton.isEnabled = sourceHasFrame
+                    toast(if (result.isSuccess) "Image saved" else "Save failed: ${result.exceptionOrNull()?.message}")
+                }
+            }
+        }
+    }
+
+    private fun focusAt(x: Float, y: Float) {
+        if (activeUri != null) return
+        val info = cameraInfo ?: return
+        val orientation = cameraOrientation(info)
+        val (width, height) = orientation.outputSize(info.width, info.height)
+        val scale = max(gl.width.toFloat() / width, gl.height.toFloat() / height)
+        val u = (x - (gl.width - width * scale) / 2) / (width * scale)
+        val v = (y - (gl.height - height * scale) / 2) / (height * scale)
+        val point = orientation.sensorPoint(u.coerceIn(0f, 1f), v.coerceIn(0f, 1f))
+        camera.focus(point.first, point.second)
+    }
+
+    private fun showDiagnostics() {
+        val details = listOfNotNull(cameraInfo?.diagnostics ?: "${identity.manufacturer} ${identity.model}\nCamera has not been opened.", lastCameraError).joinToString("\n\n")
+        val content = text(details, 12f, primary).apply {
+            typeface = Typeface.MONOSPACE; setPadding(dp(20), dp(12), dp(20), dp(12)); setTextIsSelectable(true)
+        }
+        AlertDialog.Builder(this).setTitle("Camera capabilities").setView(ScrollView(this).apply { addView(content) })
+            .setPositiveButton("Done", null).setNeutralButton("Copy") { _, _ ->
+                (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("UniNVG capabilities", details))
+                toast("Copied")
+            }.show()
+    }
+
+    private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
+
+    companion object {
+        private const val CAMERA_PERMISSION = 10
+        private const val OPEN_FILE = 11
+        private const val SAVE_FILE = 12
+    }
+}
