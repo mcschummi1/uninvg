@@ -50,7 +50,9 @@ data class CameraInfo(
     val sensorOrientation: Int,
     val frontFacing: Boolean,
     val hasFlash: Boolean,
-    val diagnostics: String
+    val diagnostics: String,
+    val tanHalfFovX: Double? = null,
+    val tanHalfFovY: Double? = null
 )
 
 /** Owns the camera and Surface wrapper, never the caller's SurfaceTexture. */
@@ -243,7 +245,13 @@ class CameraEngine(context: Context, private val listener: Listener) {
                 c[CameraCharacteristics.SENSOR_ORIENTATION] ?: 0,
                 c[CameraCharacteristics.LENS_FACING] == CameraCharacteristics.LENS_FACING_FRONT,
                 c[CameraCharacteristics.FLASH_INFO_AVAILABLE] == true,
-                diagnostics(service, run, candidate, profile, caps, size)
+                diagnostics(service, run, candidate, profile, caps, size),
+                c[CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE]?.width?.toDouble()?.let { physical ->
+                    c[CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS]?.firstOrNull()?.takeIf { it > 0 }?.let { physical / (2 * it) }
+                },
+                c[CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE]?.height?.toDouble()?.let { physical ->
+                    c[CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS]?.firstOrNull()?.takeIf { it > 0 }?.let { physical / (2 * it) }
+                }
             )
             if (!current(run.generation) || desired !== run) return
             val next = Attempt(run, candidate, info)

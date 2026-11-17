@@ -17,6 +17,8 @@ data class NvSettings(
     val vr: Boolean = false,
     val automatic: Boolean = true,
     val exposureBias: Float = 0f,
+    val manualShutterNs: Long = 100_000_000,
+    val manualIso: Int = 800,
     val digitalGain: Float = 1f,
     val gamma: Float = 1f,
     val denoise: Float = 0.45f,
@@ -29,6 +31,8 @@ data class NvSettings(
         require(fps in SUPPORTED_FPS)
         require(resolution in SUPPORTED_RESOLUTIONS)
         require(exposureBias.isFinite() && exposureBias in -2f..2f)
+        require(manualShutterNs > 0)
+        require(manualIso > 0)
         require(digitalGain.isFinite() && digitalGain in 1f..16f)
         require(gamma.isFinite() && gamma in 0.5f..2.5f)
         require(denoise.isFinite() && denoise in 0f..1f)

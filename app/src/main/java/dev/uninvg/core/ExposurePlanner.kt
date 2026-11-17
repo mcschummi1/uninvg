@@ -11,10 +11,8 @@ object ExposurePlanner {
             "Stream minimum exceeds the sensor's maximum frame duration"
         }
         val budget = frameBudgetNs(settings.fps)
-        val reserve = (budget / 20).coerceIn(1_000_000L, 5_000_000L)
-            .coerceAtMost(caps.maxFrameDurationNs / 10).coerceAtLeast(1L)
-        val exposureCeiling = min(caps.exposureMaxNs, min(budget, caps.maxFrameDurationNs) - reserve)
-            .coerceAtLeast(caps.exposureMinNs)
+        val reserve = readoutReserve(caps, settings.fps)
+        val exposureCeiling = maxExposureNs(caps, settings.fps)
         val exposure = ceil(exposureProduct / caps.isoMin).toLong()
             .coerceIn(caps.exposureMinNs, exposureCeiling)
         val requiredIso = ceil(exposureProduct / exposure).toInt()
@@ -23,6 +21,17 @@ object ExposurePlanner {
             requiredIso.coerceIn(caps.analogCeiling, caps.isoMax)
         } else {
             analogIso
+        }
+        if (caps.manualSensor && !settings.automatic) {
+            val exposure = settings.manualShutterNs.coerceIn(caps.exposureMinNs, exposureCeiling)
+            val iso = settings.manualIso.coerceIn(caps.isoMin, caps.isoMax)
+            val exposureWithReadout = if (exposure > Long.MAX_VALUE - reserve) Long.MAX_VALUE else exposure + reserve
+            val duration = max(max(budget, caps.minFrameDurationNs), exposureWithReadout).coerceAtMost(caps.maxFrameDurationNs)
+            return CapturePlan(
+                true, exposure, iso, duration, null, settings.fps,
+                duration != budget || duration < exposureWithReadout,
+                exposure == exposureCeiling && iso == caps.isoMax
+            )
         }
         if (!caps.manualSensor) {
             val range = selectAeRange(caps.aeFpsRanges, settings.fps, caps.minFrameDurationNs)
@@ -43,6 +52,14 @@ object ExposurePlanner {
             exposure == exposureCeiling && iso == caps.isoMax
         )
     }
+
+    fun maxExposureNs(caps: CameraCaps, fps: Float): Long =
+        min(caps.exposureMaxNs, min(frameBudgetNs(fps), caps.maxFrameDurationNs) - readoutReserve(caps, fps))
+            .coerceAtLeast(caps.exposureMinNs)
+
+    private fun readoutReserve(caps: CameraCaps, fps: Float): Long =
+        (frameBudgetNs(fps) / 20).coerceIn(1_000_000L, 5_000_000L)
+            .coerceAtMost(caps.maxFrameDurationNs / 10).coerceAtLeast(1L)
 
     private fun selectAeRange(ranges: List<FpsRange>, fps: Float, streamMinimum: Long): FpsRange? {
         val streamCeiling = if (streamMinimum == 0L) Double.POSITIVE_INFINITY else 1_000_000_000.0 / streamMinimum

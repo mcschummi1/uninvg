@@ -155,7 +155,8 @@ class MainActivityTest {
 
     @Test fun noInternetOrStoragePermissionsAreDeclared() {
         val info = activity.packageManager.getPackageInfo(activity.packageName, android.content.pm.PackageManager.GET_PERMISSIONS)
-        assertEquals(listOf(android.Manifest.permission.CAMERA), info.requestedPermissions.orEmpty().toList())
+        assertEquals(setOf(android.Manifest.permission.CAMERA, android.Manifest.permission.ACCESS_COARSE_LOCATION,
+            android.Manifest.permission.ACCESS_FINE_LOCATION), info.requestedPermissions.orEmpty().toSet())
     }
 
     @Test
@@ -177,6 +178,64 @@ class MainActivityTest {
         saveScreenshot("landscape", activity.window.decorView)
         gear().performClick(); button("Capture").performClick()
         renderSettings("landscape-settings")
+    }
+
+    @Test fun manualSlidersAppearOnlyForAUsableLiveSensor() {
+        activity.onReady(cameraInfo(true))
+        gear().performClick()
+        views().filterIsInstance<Switch>().single { it.text == "Automatic" }.performClick()
+        button("Capture").performClick()
+        assertEquals(setOf("ISO", "Shutter"), views().filterIsInstance<SeekBar>().map { it.contentDescription }.toSet())
+        button("Image").performClick()
+        views().filterIsInstance<Switch>().single { it.text == "Automatic" }.performClick()
+        button("Capture").performClick()
+        assertTrue(views().filterIsInstance<SeekBar>().isEmpty())
+    }
+
+    @Test fun unsupportedCameraDoesNotOfferManualIsoOrShutter() {
+        activity.onReady(cameraInfo(false))
+        gear().performClick()
+        views().filterIsInstance<Switch>().single { it.text == "Automatic" }.performClick()
+        button("Capture").performClick()
+        assertTrue(views().filterIsInstance<SeekBar>().isEmpty())
+        assertTrue(views().filterIsInstance<TextView>().any { it.text == "Manual sensor controls unavailable" })
+    }
+
+    @Test fun storedManualValuesSurviveRecreation() {
+        preferences().edit().putBoolean("automatic", false).putInt("manualIso", 1200).putLong("manualShutterNs", 20_000_000).commit()
+        lifecycle.pause().stop().destroy()
+        lifecycle = Robolectric.buildActivity(MainActivity::class.java).create().start().resume().visible()
+        activity = lifecycle.get()
+        activity.onReady(cameraInfo(true))
+        gear().performClick(); button("Capture").performClick()
+        assertTrue(views().filterIsInstance<TextView>().any { it.text == "1200" })
+        assertTrue(views().filterIsInstance<TextView>().any { it.text == "20.00 ms" })
+    }
+
+    @Test fun memoryIsAccessibleWithoutRequestingLocationAtStartup() {
+        gear().performClick(); button("Memory").performClick()
+        assertTrue(views().filterIsInstance<TextView>().any { it.text.toString().contains("Scene Memory needs gyro") })
+        assertFalse(activity.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
+
+    @Test
+    @Config(qualifiers = "w360dp-h800dp-port-xxhdpi")
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun manualSensorPanelRendersWithCapabilityBounds() {
+        layout(activity.window.decorView, 1080, 2400)
+        activity.onReady(cameraInfo(true))
+        gear().performClick()
+        views().filterIsInstance<Switch>().single { it.text == "Automatic" }.performClick()
+        button("Capture").performClick()
+        renderSettings("manual-sensor-settings")
+        button("Memory").performClick()
+        renderSettings("memory-settings")
+    }
+
+    private fun cameraInfo(manual: Boolean): dev.uninvg.camera.CameraInfo {
+        val caps = dev.uninvg.core.CameraCaps(manual, 37, 3200, 800, 100_000, 2_000_000_000, 2_000_000_000, 8_000_000)
+        val profile = dev.uninvg.core.ProfileSelector.select(dev.uninvg.core.DeviceIdentity("samsung", "SM-S921B", "Exynos 2400"), caps)
+        return dev.uninvg.camera.CameraInfo("0", profile, caps, 1280, 720, 90, false, true, "Test capabilities", 0.7, 0.5)
     }
 
     private fun renderSettings(name: String) {

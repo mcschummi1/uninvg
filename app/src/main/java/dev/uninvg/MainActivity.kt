@@ -42,6 +42,8 @@ import dev.uninvg.camera.CameraInfo
 import dev.uninvg.core.*
 import dev.uninvg.media.MediaSource
 import dev.uninvg.media.SnapshotWriter
+import dev.uninvg.memory.SceneMemoryController
+import dev.uninvg.memory.SceneOverlay
 import dev.uninvg.render.NightRenderer
 import dev.uninvg.render.CameraOrientation
 import java.util.Locale
@@ -50,7 +52,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 
 class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, MediaSource.Listener {
     private val ink = Color.rgb(9, 13, 12)
@@ -70,6 +71,8 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private lateinit var media: MediaSource
     private lateinit var gl: GLSurfaceView
     private lateinit var renderer: NightRenderer
+    private lateinit var memory: SceneMemoryController
+    private lateinit var memoryOverlay: SceneOverlay
     private lateinit var root: FrameLayout
     private lateinit var gearButton: android.widget.ImageButton
     private lateinit var status: TextView
@@ -157,6 +160,11 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         gl.setRenderer(renderer)
         gl.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         root.addView(gl, FrameLayout.LayoutParams(-1, -1))
+        memoryOverlay = SceneOverlay(this)
+        root.addView(memoryOverlay, FrameLayout.LayoutParams(-1, -1))
+        memory = SceneMemoryController(this, memoryOverlay, { requestSceneLocation() }, {
+            if (settingsDialog?.isShowing == true && selectedTab == 4) showTab(4)
+        })
         val hud = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         sceneLabel = text("LOW-LIGHT OPTICS", 10f, accent).apply {
             letterSpacing = 0.12f
@@ -222,6 +230,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         sceneLabel.setTextColor(color)
         status.setTextColor(color)
         gearButton.setColorFilter(color)
+        memory.update(settings, color)
     }
 
     private fun hideSystemBars() {
@@ -250,10 +259,11 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         header.addView(button("Done") { dialog.dismiss() }, LinearLayout.LayoutParams(dp(76), dp(48)))
         sheet.addView(header)
         tabRow = row()
-        listOf("Image", "Capture", "Color", "Display").forEachIndexed { index, title ->
-            tabRow.addView(button(title) { showTab(index) }, LinearLayout.LayoutParams(0, dp(44), 1f))
+        listOf("Image", "Capture", "Color", "Display", "Memory").forEachIndexed { index, title ->
+            tabRow.addView(button(title) { showTab(index) }, LinearLayout.LayoutParams(-2, dp(44)))
         }
-        sheet.addView(tabRow, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
+        sheet.addView(HorizontalScrollView(this).apply { addView(tabRow); isHorizontalScrollBarEnabled = false },
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) })
         panelContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         settingsScroll = ScrollView(this).apply {
             addView(panelContent)
@@ -262,6 +272,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         sheet.addView(settingsScroll, LinearLayout.LayoutParams(-1, 0, 1f))
         dialog.setContentView(sheet)
         dialog.setOnDismissListener {
+            memory.panelClosed()
             settingsDialog = null
             settingsScroll = null
             lightSwitch = null
@@ -290,6 +301,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     }
 
     private fun showTab(index: Int) {
+        if (selectedTab == 4 && index != 4) memory.panelClosed()
         selectedTab = index
         for (i in 0 until tabRow.childCount) {
             (tabRow.getChildAt(i) as Button).apply {
@@ -301,7 +313,10 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         panelContent.removeAllViews()
         when (index) {
             0 -> {
-                toggle("Automatic", settings.automatic) { changeSettings(settings.copy(automatic = it)) }
+                toggle("Automatic", settings.automatic) {
+                    changeSettings(settings.copy(automatic = it))
+                    showTab(0)
+                }
                 slider("Exposure", settings.exposureBias, -2f, 2f, { String.format(Locale.US, "%+.1f EV", it) }) {
                     changeSettings(settings.copy(exposureBias = it))
                 }
@@ -317,9 +332,28 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
                 toggle("Regional light · Experimental", settings.regional) { changeSettings(settings.copy(regional = it)) }
             }
             1 -> {
+                if (!settings.automatic) {
+                    section("MANUAL SENSOR")
+                    val caps = cameraInfo?.caps
+                    if (activeUri == null && caps?.manualSensor == true) {
+                        logSlider("Shutter", settings.manualShutterNs.toDouble(), caps.exposureMinNs.toDouble(),
+                            ExposurePlanner.maxExposureNs(caps, settings.fps).toDouble(), { formatShutter(it.toLong()) }) {
+                            changeSettings(settings.copy(manualShutterNs = it.toLong()))
+                        }
+                        logSlider("ISO", settings.manualIso.toDouble(), caps.isoMin.toDouble(), caps.isoMax.toDouble(), { it.toInt().toString() }) {
+                            changeSettings(settings.copy(manualIso = it.toInt()))
+                        }
+                        caps.maxAnalogIso?.let { iso -> panelContent.addView(text("Analog gain ceiling · ISO $iso", 11f, secondary)) }
+                        val plan = ExposurePlanner.plan(caps, settings, exposureProduct)
+                        if (plan.exposureNs != settings.manualShutterNs || plan.iso != settings.manualIso) {
+                            panelContent.addView(text("Applied target · ${formatShutter(plan.exposureNs)} · ISO ${plan.iso}", 11f, secondary))
+                        }
+                    } else panelContent.addView(text("Manual sensor controls unavailable", 12f, secondary))
+                }
                 section("TARGET FRAME RATE")
                 chips(SUPPORTED_FPS.map { fpsLabel(it) }, SUPPORTED_FPS.indexOf(settings.fps)) { position ->
                     changeSettings(settings.copy(fps = SUPPORTED_FPS[position]))
+                    showTab(1)
                 }
                 section("TEMPORAL DENOISE")
                 val limit = cameraInfo?.profile?.maxStackDepth ?: 8
@@ -344,9 +378,12 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
                     changeSettings(settings.copy(resolution = SUPPORTED_RESOLUTIONS[position]))
                 }
             }
+            4 -> panelContent.addView(memory.panel())
         }
         updateButtons()
         settingsScroll?.post { settingsScroll?.scrollTo(0, 0) }
+        val tabs = tabRow.parent as HorizontalScrollView
+        tabs.post { tabs.scrollTo((tabRow.getChildAt(index).right - tabs.width).coerceAtLeast(0), 0) }
     }
 
     private fun section(title: String) {
@@ -380,6 +417,35 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
                 override fun onProgressChanged(bar: SeekBar?, position: Int, fromUser: Boolean) {
                     if (!fromUser) return
                     val next = low + position / 200f * (high - low)
+                    current.text = format(next)
+                    update(next)
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+            })
+        }, LinearLayout.LayoutParams(-1, dp(48)))
+    }
+
+    private fun formatShutter(ns: Long): String = if (ns >= 1_000_000_000L)
+        String.format(Locale.US, "%.2f s", ns / 1_000_000_000.0)
+    else String.format(Locale.US, "%.2f ms", ns / 1_000_000.0)
+
+    private fun logSlider(title: String, value: Double, minimum: Double, maximum: Double, format: (Double) -> String, update: (Double) -> Unit) {
+        val scale = LogScale(minimum, maximum)
+        val labels = row()
+        labels.addView(text(title, 12f, primary), LinearLayout.LayoutParams(0, dp(24), 1f))
+        val current = text(format(value.coerceIn(minimum, maximum)), 12f, accent)
+        labels.addView(current)
+        panelContent.addView(labels)
+        panelContent.addView(SeekBar(this).apply {
+            max = scale.steps
+            progress = scale.progress(value)
+            contentDescription = title
+            isEnabled = minimum < maximum
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, position: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    val next = scale.value(position)
                     current.text = format(next)
                     update(next)
                 }
@@ -449,17 +515,14 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         preferences.edit().putFloat("fps", settings.fps).putBoolean("automatic", settings.automatic)
             .putFloat("bias", settings.exposureBias).putFloat("gain", settings.digitalGain).putFloat("gamma", settings.gamma)
             .putFloat("denoise", settings.denoise).putInt("stack", settings.stackDepth).putInt("palette", settings.palette.ordinal)
-            .putBoolean("regional", settings.regional).putInt("resolution", settings.resolution).putBoolean("vr", settings.vr).apply()
+            .putBoolean("regional", settings.regional).putInt("resolution", settings.resolution).putBoolean("vr", settings.vr)
+            .putInt("manualIso", settings.manualIso).putLong("manualShutterNs", settings.manualShutterNs).apply()
         applyHudColor()
         updateStatus()
         updateButtons()
     }
 
-    private fun manualExposure(): Double {
-        val caps = cameraInfo?.caps ?: return exposureProduct
-        val budget = min(caps.exposureMaxNs, frameBudgetNs(settings.fps)).toDouble()
-        return budget * caps.analogCeiling * 2.0.pow(settings.exposureBias.toDouble())
-    }
+    private fun manualExposure(): Double = settings.manualShutterNs.toDouble() * settings.manualIso
 
     private fun restoreSettings(): NvSettings = try {
         NvSettings(fps = try { preferences.getFloat("fps", 15f) } catch (_: ClassCastException) { preferences.getInt("fps", 15).toFloat() },
@@ -467,13 +530,15 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
             automatic = preferences.getBoolean("automatic", true), exposureBias = preferences.getFloat("bias", 0f),
             digitalGain = preferences.getFloat("gain", 1f), gamma = preferences.getFloat("gamma", 1f),
             denoise = preferences.getFloat("denoise", 0.45f), stackDepth = preferences.getInt("stack", 4),
-            palette = Palette.entries[preferences.getInt("palette", 1)], regional = preferences.getBoolean("regional", false))
+            palette = Palette.entries[preferences.getInt("palette", 1)], regional = preferences.getBoolean("regional", false),
+            manualIso = preferences.getInt("manualIso", 800), manualShutterNs = preferences.getLong("manualShutterNs", 100_000_000))
     } catch (error: RuntimeException) { NvSettings() }
 
     override fun onResume() {
         super.onResume()
         resumed = true
         gl.onResume()
+        memory.resume()
         hideSystemBars()
         displayManager.registerDisplayListener(displayListener, main)
         startSource()
@@ -482,6 +547,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
 
     override fun onPause() {
         resumed = false
+        memory.pause()
         displayManager.unregisterDisplayListener(displayListener)
         camera.stop()
         media.stop()
@@ -494,6 +560,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         settingsDialog?.dismiss()
         camera.release()
         media.release()
+        memory.release()
         analysis.shutdownNow()
         io.shutdown()
         if (!snapshotWriting) pendingSnapshot?.recycle()
@@ -522,6 +589,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val surface = texture ?: return
         if (!resumed) return
         invalidateAnalysis()
+        memory.camera(null, displayDegrees())
         sourceHasFrame = false
         snapshotButton.isEnabled = false
         renderer.resetHistory()
@@ -567,8 +635,13 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         }
     }
 
+    private fun requestSceneLocation() {
+        requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), LOCATION_PERMISSION)
+    }
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grants: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grants)
+        if (requestCode == LOCATION_PERMISSION) memory.locationPermissionChanged()
         if (requestCode == CAMERA_PERMISSION) {
             if (grants.firstOrNull() == PackageManager.PERMISSION_GRANTED) startSource()
             else showPlaceholder("Camera access is off", true)
@@ -601,6 +674,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val orientation = cameraOrientation(info)
         lastDisplayDegrees = orientation.displayDegrees
         renderer.configureCamera(info.width, info.height, orientation)
+        memory.camera(info, orientation.displayDegrees)
     }
 
     private fun refreshCameraOrientation() {
@@ -627,6 +701,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val sampleEpoch = analysisEpoch
         main.post {
             if (!resumed || sampleEpoch != analysisEpoch) return@post
+            if (activeUri == null) memory.reference(luma, width, height)
             if (activeUri == null && cameraInfo?.caps?.manualSensor == true && captures[timestampNs] == null) {
                 pendingSample = PendingSample(luma, width, height, timestampNs, sampleEpoch)
                 return@post
@@ -701,6 +776,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         sourceHasFrame = false
         snapshotButton.isEnabled = false
         lastCameraError = message
+        memory.camera(null, displayDegrees())
         showPlaceholder("Camera unavailable", true)
         permissionButton.text = "Retry camera"
         status.text = "Camera unavailable"
@@ -849,5 +925,6 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         private const val CAMERA_PERMISSION = 10
         private const val OPEN_FILE = 11
         private const val SAVE_FILE = 12
+        private const val LOCATION_PERMISSION = 13
     }
 }
