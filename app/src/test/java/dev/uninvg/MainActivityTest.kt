@@ -208,9 +208,9 @@ class MainActivityTest {
         gear().performClick()
         button("Update").performClick()
         button("Browse versions").performClick()
-        val items = views().filterIsInstance<TextView>().map { it.text.toString() }
-        assertTrue(items.any { it.startsWith("v0.4.5.5") && it.contains("installed") })
-        assertTrue(items.any { it.startsWith("v0.3.0") && it.contains("older") })
+        eventually { views().filterIsInstance<TextView>().map { it.text.toString() }
+            .let { items -> items.any { it.startsWith("v0.4.5.5") && it.contains("installed") } &&
+                items.any { it.startsWith("v0.3.0") && it.contains("older") } } }
     }
 
     @Test fun launchAutoCheckSurfacesANewerReleaseWithoutUserAction() {
