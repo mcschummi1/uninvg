@@ -160,13 +160,14 @@ class MainActivityTest {
     @Test fun onlyUpdaterPermissionsWereAddedOnTopOfCameraAndLocation() {
         val info = activity.packageManager.getPackageInfo(activity.packageName, android.content.pm.PackageManager.GET_PERMISSIONS)
         val requested = info.requestedPermissions.orEmpty().toSet()
-        assertEquals(setOf(android.Manifest.permission.INTERNET, android.Manifest.permission.REQUEST_INSTALL_PACKAGES),
+        assertEquals(setOf(android.Manifest.permission.INTERNET, android.Manifest.permission.REQUEST_INSTALL_PACKAGES,
+            "$packageName.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"),
             requested - setOf(android.Manifest.permission.CAMERA, android.Manifest.permission.ACCESS_COARSE_LOCATION,
                 android.Manifest.permission.ACCESS_FINE_LOCATION))
     }
 
     @Test fun updateTabChecksGitHubAndOffersTheNewerReleaseDownload() {
-        activity.updateFetcher = { AppUpdate.ReleaseInfo("v9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk") }
+        activity.updateFetcher = { AppUpdate.ReleaseInfo("9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk") }
         gear().performClick()
         button("Update").performClick()
         assertTrue(views().filterIsInstance<TextView>().any { it.text.toString().contains("Installed · v") })
@@ -177,7 +178,7 @@ class MainActivityTest {
     }
 
     @Test fun launchAutoCheckSurfacesANewerReleaseWithoutUserAction() {
-        activity.updateFetcher = { AppUpdate.ReleaseInfo("v9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk") }
+        activity.updateFetcher = { AppUpdate.ReleaseInfo("9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk") }
         Shadows.shadowOf(Looper.getMainLooper()).runToEndOfTasks()
         gear().performClick()
         button("Update").performClick()
