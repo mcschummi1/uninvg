@@ -7,9 +7,9 @@ import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.graphics.Typeface
@@ -17,6 +17,7 @@ import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.opengl.GLSurfaceView
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -41,10 +42,9 @@ import androidx.core.content.FileProvider
 import dev.uninvg.camera.CameraEngine
 import dev.uninvg.camera.CameraInfo
 import dev.uninvg.core.*
-import dev.uninvg.media.MediaSource
-import dev.uninvg.media.SnapshotWriter
 import dev.uninvg.memory.SceneMemoryController
 import dev.uninvg.memory.SceneOverlay
+import dev.uninvg.hud.HudFormat
 import dev.uninvg.render.NightRenderer
 import dev.uninvg.render.CameraOrientation
 import dev.uninvg.update.AppUpdate
@@ -57,7 +57,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, MediaSource.Listener {
+class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     private val ink = Color.rgb(9, 13, 12)
     private val panel = Color.rgb(19, 26, 23)
     private val accent = Color.rgb(174, 221, 171)
@@ -72,10 +72,11 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private data class PendingSample(val luma: FloatArray, val width: Int, val height: Int, val timestampNs: Long, val epoch: Int)
     private var pendingSample: PendingSample? = null
     private lateinit var camera: CameraEngine
-    private lateinit var media: MediaSource
     private lateinit var gl: GLSurfaceView
     private lateinit var renderer: NightRenderer
     private lateinit var memory: SceneMemoryController
+    private lateinit var hud: LinearLayout
+    private lateinit var infoText: TextView
     private lateinit var memoryOverlay: SceneOverlay
     private lateinit var root: FrameLayout
     private lateinit var gearButton: android.widget.ImageButton
@@ -85,9 +86,6 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private lateinit var placeholderText: TextView
     private lateinit var permissionButton: Button
     private var lightSwitch: Switch? = null
-    private lateinit var snapshotButton: Button
-    private lateinit var sourceButton: Button
-    private lateinit var playButton: Button
     private lateinit var panelContent: LinearLayout
     private lateinit var tabRow: LinearLayout
     private var selectedTab = 0
@@ -114,9 +112,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private var enhancement = Enhancement()
     private var cameraInfo: CameraInfo? = null
     private var texture: SurfaceTexture? = null
-    private var activeUri: Uri? = null
     private var resumed = false
-    private var isVideo = false
     private var exposureProduct = 10_000_000.0 * 100
     private var measured: CaptureMetadata? = null
     private var scene = SceneKind.DARK
@@ -124,9 +120,6 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private var smoothedFps = 0.0
     private var lastStatusUpdate = 0L
     @Volatile private var analysisEpoch = 0
-    private var lastPhotoSample: FloatArray? = null
-    private var pendingSnapshot: Bitmap? = null
-    private var snapshotWriting = false
     private var sourceHasFrame = false
     private var lastCameraError: String? = null
     private val preferences by lazy { getSharedPreferences("controls", MODE_PRIVATE) }
@@ -139,9 +132,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         settings = restoreSettings()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         camera = CameraEngine(this, this)
-        media = MediaSource(this, this)
         buildUi()
-        activeUri = savedInstanceState?.getString("source")?.let(Uri::parse)
     }
 
     private fun buildUi() {
@@ -177,7 +168,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         memory = SceneMemoryController(this, memoryOverlay, { requestSceneLocation() }, {
             if (settingsDialog?.isShowing == true && selectedTab == 4) showTab(4)
         })
-        val hud = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        hud = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         sceneLabel = text("LOW-LIGHT OPTICS", 10f, accent).apply {
             letterSpacing = 0.12f
             setPadding(dp(10), dp(5), dp(10), dp(5))
@@ -189,10 +180,16 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
             setPadding(dp(10), dp(4), dp(10), dp(4))
             background = rounded(Color.argb(150, 0, 0, 0), 16)
         }
-        hud.addView(status, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
+        infoText = text("", 10f, accent).apply {
+            typeface = Typeface.MONOSPACE; maxLines = 1
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            background = rounded(Color.argb(150, 0, 0, 0), 16)
+        }
+        hud.addView(infoText, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
         root.addView(hud, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
             topMargin = dp(12); marginStart = dp(12)
         })
+        layoutHud()
         gearButton = android.widget.ImageButton(this).apply {
             setImageResource(R.drawable.ic_gear)
             contentDescription = "Settings"
@@ -211,20 +208,6 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         permissionButton = button("Enable camera") { requestCamera() }
         placeholder.addView(permissionButton, LinearLayout.LayoutParams(-2, dp(48)).apply { topMargin = dp(16) })
         root.addView(placeholder, FrameLayout.LayoutParams(-1, -1))
-        playButton = button("Pause") { playButton.text = if (media.togglePlayback()) "Pause" else "Play" }.apply { visibility = View.GONE }
-        root.addView(playButton, FrameLayout.LayoutParams(dp(84), dp(44), Gravity.BOTTOM or Gravity.END).apply {
-            bottomMargin = dp(68); marginEnd = dp(12)
-        })
-        val footer = row()
-        sourceButton = button("Import") { chooseSource() }.apply { background = rounded(Color.argb(170, 10, 16, 13), 22) }
-        snapshotButton = button("Save frame") { renderer.snapshot() }.apply {
-            setTextColor(ink); background = rounded(accent, 22); isEnabled = false
-        }
-        footer.addView(sourceButton, LinearLayout.LayoutParams(-2, dp(44)).apply { marginEnd = dp(10) })
-        footer.addView(snapshotButton, LinearLayout.LayoutParams(-2, dp(44)))
-        root.addView(footer, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-            bottomMargin = dp(14)
-        })
         applyHudColor()
         updateButtons()
     }
@@ -241,6 +224,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val color = hudColor()
         sceneLabel.setTextColor(color)
         status.setTextColor(color)
+        infoText.setTextColor(color)
         gearButton.setColorFilter(if (updateReady() != null) accent else color)
         memory.update(settings, color)
     }
@@ -347,7 +331,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
                 if (!settings.automatic) {
                     section("MANUAL SENSOR")
                     val caps = cameraInfo?.caps
-                    if (activeUri == null && caps?.manualSensor == true) {
+                    if (caps?.manualSensor == true) {
                         logSlider("Shutter", settings.manualShutterNs.toDouble(), caps.exposureMinNs.toDouble(),
                             ExposurePlanner.maxExposureNs(caps, settings.fps).toDouble(), { formatShutter(it.toLong()) }) {
                             changeSettings(settings.copy(manualShutterNs = it.toLong()))
@@ -530,17 +514,12 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val resolutionChanged = next.resolution != settings.resolution
         val reanalyze = next.automatic != settings.automatic || next.exposureBias != settings.exposureBias || next.regional != settings.regional || next.digitalGain != settings.digitalGain
         settings = next
-        if (reanalyze) {
-            analysis.execute { controller.reset() }
-            if (activeUri != null && !isVideo) lastPhotoSample?.let { onSample(it, 64, 64, System.nanoTime()) }
-        }
+        if (reanalyze) analysis.execute { controller.reset() }
         renderer.update(settings, enhancement)
-        if (activeUri == null) {
-            if (resolutionChanged) startSource()
-            else {
-                val product = if (settings.automatic) exposureProduct else manualExposure()
-                camera.update(settings, product)
-            }
+        if (resolutionChanged) startSource()
+        else {
+            val product = if (settings.automatic) exposureProduct else manualExposure()
+            camera.update(settings, product)
         }
         preferences.edit().putFloat("fps", settings.fps).putBoolean("automatic", settings.automatic)
             .putFloat("bias", settings.exposureBias).putFloat("gain", settings.digitalGain).putFloat("gamma", settings.gamma)
@@ -581,7 +560,6 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         memory.pause()
         displayManager.unregisterDisplayListener(displayListener)
         camera.stop()
-        media.stop()
         invalidateAnalysis()
         gl.onPause()
         super.onPause()
@@ -590,18 +568,10 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     override fun onDestroy() {
         settingsDialog?.dismiss()
         camera.release()
-        media.release()
         memory.release()
         analysis.shutdownNow()
         io.shutdown()
-        if (!snapshotWriting) pendingSnapshot?.recycle()
-        pendingSnapshot = null
         super.onDestroy()
-    }
-
-    override fun onSaveInstanceState(state: Bundle) {
-        state.putString("source", activeUri?.toString())
-        super.onSaveInstanceState(state)
     }
 
     override fun onConfigurationChanged(configuration: Configuration) {
@@ -622,30 +592,17 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         invalidateAnalysis()
         memory.camera(null, displayDegrees())
         sourceHasFrame = false
-        snapshotButton.isEnabled = false
         renderer.resetHistory()
         renderer.update(settings, enhancement)
-        activeUri?.let { uri ->
-            showPlaceholder("Opening file…", false)
-            media.stop()
-            camera.stop {
-                if (resumed && activeUri == uri && texture === surface) media.open(uri, surface)
-            }
-        } ?: run {
-            media.stop()
-            isVideo = false
-            playButton.visibility = View.GONE
-            if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                showPlaceholder("Opening camera…", false)
-                camera.start(surface, identity, settings)
-            } else showPlaceholder("See further into the dark", true)
-        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            showPlaceholder("Opening camera…", false)
+            camera.start(surface, identity, settings)
+        } else showPlaceholder("See further into the dark", true)
         updateButtons()
     }
 
     private fun invalidateAnalysis() {
         analysisEpoch++
-        lastPhotoSample = null
         captures.clear()
         pendingSample = null
         measured = null
@@ -680,7 +637,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     }
 
     override fun onReady(info: CameraInfo) {
-        if (!resumed || activeUri != null) return
+        if (!resumed) return
         cameraInfo = info
         lastCameraError = null
         configureCameraSource(info)
@@ -708,8 +665,9 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         memory.camera(info, orientation.displayDegrees)
     }
 
-    private fun refreshCameraOrientation() {
-        if (activeUri != null || displayDegrees() == lastDisplayDegrees) return
+    internal fun refreshCameraOrientation() {
+        layoutHud()
+        if (displayDegrees() == lastDisplayDegrees) return
         cameraInfo?.let {
             invalidateAnalysis()
             configureCameraSource(it)
@@ -717,8 +675,18 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         }
     }
 
+    private fun layoutHud() {
+        val landscape = displayDegrees() == 90 || displayDegrees() == 270
+        val params = hud.layoutParams as FrameLayout.LayoutParams
+        params.gravity = if (landscape) Gravity.TOP or Gravity.END else Gravity.TOP or Gravity.START
+        params.topMargin = if (landscape) dp(62) else dp(12)
+        params.marginStart = if (landscape) 0 else dp(12)
+        params.marginEnd = if (landscape) dp(12) else 0
+        hud.layoutParams = params
+    }
+
     override fun onCapture(metadata: CaptureMetadata) {
-        if (!resumed || activeUri != null) return
+        if (!resumed) return
         captures[metadata.timestampNs] = metadata
         while (captures.size > 120) captures.remove(captures.keys.first())
         measured = metadata
@@ -732,36 +700,32 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val sampleEpoch = analysisEpoch
         main.post {
             if (!resumed || sampleEpoch != analysisEpoch) return@post
-            if (activeUri == null) memory.reference(luma, width, height)
-            if (activeUri == null && cameraInfo?.caps?.manualSensor == true && captures[timestampNs] == null) {
+            memory.reference(luma, width, height)
+            if (cameraInfo?.caps?.manualSensor == true && captures[timestampNs] == null) {
                 pendingSample = PendingSample(luma, width, height, timestampNs, sampleEpoch)
                 return@post
             }
             if (!analyzing.compareAndSet(false, true)) return@post
-            if (activeUri != null && !isVideo) lastPhotoSample = luma
             val epoch = analysisEpoch
             val capturedSettings = settings
             val info = cameraInfo
-            val fileMode = activeUri != null
-            val stillImage = fileMode && !isVideo
-            val metadata = if (fileMode) null else captures[timestampNs]
-            val plan = if (fileMode || info == null) CapturePlan(false, 1, 100, frameBudgetNs(settings.fps), null, settings.fps, false, true)
+            val metadata = captures[timestampNs]
+            val plan = if (info == null) CapturePlan(false, 1, 100, frameBudgetNs(settings.fps), null, settings.fps, false, true)
                 else ExposurePlanner.plan(info.caps, settings, exposureProduct)
             analysis.execute {
                 try {
                     val stats = SceneAnalyzer.analyze(luma, width, height)
-                    val decision = controller.update(stats, metadata, plan, capturedSettings, timestampNs, stillImage)
+                    val decision = controller.update(stats, metadata, plan, capturedSettings, timestampNs, false)
                     main.post {
                         if (epoch != analysisEpoch || !resumed) return@post
                         scene = stats.kind
                         enhancement = decision.enhancement
-                        if (!fileMode && info != null && settings.automatic && metadata != null) {
+                        if (info != null && settings.automatic && metadata != null) {
                             val changed = abs(kotlin.math.ln(decision.exposureProduct / exposureProduct)) > 0.06
                             exposureProduct = decision.exposureProduct
                             if (changed) camera.update(settings, exposureProduct)
                         }
                         renderer.update(settings, enhancement)
-                        if (fileMode && !isVideo) frameReady()
                         updateStatus()
                     }
                 } catch (error: RuntimeException) {
@@ -789,23 +753,36 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private fun frameReady() {
         sourceHasFrame = true
         placeholder.visibility = View.GONE
-        snapshotButton.isEnabled = pendingSnapshot == null
     }
 
     private fun updateStatus() {
         val fps = if (smoothedFps > 0) String.format(Locale.US, "%.1f", smoothedFps) else "—"
         val iso = measured?.iso?.toString() ?: "—"
         val exposure = measured?.exposureNs?.let { String.format(Locale.US, "%.1f ms", it / 1_000_000.0) } ?: "—"
-        status.text = if (activeUri != null) {
-            if (isVideo) "FILE · $fps fps  /  ${fpsLabel(settings.fps)} target" else "PHOTO · ${settings.palette.label.uppercase(Locale.US)}"
-        } else "$fps fps / ${fpsLabel(settings.fps)} target   ·   ISO $iso   ·   $exposure"
+        status.text = "$fps fps / ${fpsLabel(settings.fps)} target   ·   ISO $iso   ·   $exposure"
         sceneLabel.text = (if (settings.automatic) scene.label else "Manual") + if (settings.regional) " · REGIONAL" else ""
+        refreshDeviceInfo()
+    }
+
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    internal fun refreshDeviceInfo() {
+        val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val temperature = battery?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+        val percent = if (level >= 0 && scale > 0) level * 100 / scale else null
+        val line = HudFormat.batteryLine(percent, if (temperature != Int.MIN_VALUE) temperature else null)
+        if (line == null) {
+            infoText.visibility = View.GONE
+        } else {
+            infoText.visibility = View.VISIBLE
+            infoText.text = line
+        }
     }
 
     override fun onError(message: String) {
-        if (!resumed || activeUri != null) return
+        if (!resumed) return
         sourceHasFrame = false
-        snapshotButton.isEnabled = false
         lastCameraError = message
         memory.camera(null, displayDegrees())
         showPlaceholder("Camera unavailable", true)
@@ -827,107 +804,13 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
 
     private fun updateButtons() {
         lightSwitch?.apply {
-            isEnabled = activeUri == null && cameraInfo?.hasFlash == true
+            isEnabled = cameraInfo?.hasFlash == true
             alpha = if (isEnabled) 1f else 0.4f
             if (isChecked != settings.torch) isChecked = settings.torch
-        }
-        sourceButton.text = if (activeUri == null) "Import" else "Source"
-    }
-
-    private fun chooseSource() {
-        if (activeUri == null) importFile()
-        else AlertDialog.Builder(this).setItems(arrayOf("Live camera", "Open file")) { _, which ->
-            if (which == 0) { activeUri = null; startSource() } else importFile()
-        }.show()
-    }
-
-    private fun importFile() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
-        }
-        try { startActivityForResult(intent, OPEN_FILE) }
-        catch (error: android.content.ActivityNotFoundException) { toast("No file picker available") }
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == OPEN_FILE && resultCode == RESULT_OK) {
-            val uri = data?.data ?: return
-            if (uri.scheme != "content") { toast("Choose a local media file"); return }
-            try {
-                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (error: SecurityException) {
-                android.util.Log.w("UniNVG.Media", "operation=persist_uri permission=temporary", error)
-            }
-            activeUri = uri
-            settings = settings.copy(torch = false)
-            startSource()
-        } else if (requestCode == SAVE_FILE) {
-            val bitmap = pendingSnapshot ?: return
-            if (resultCode == RESULT_OK && data?.data != null) saveBitmap(bitmap, data.data)
-            else { bitmap.recycle(); pendingSnapshot = null; snapshotButton.isEnabled = sourceHasFrame }
-        }
-    }
-
-    override fun onPhoto(bitmap: Bitmap) {
-        isVideo = false
-        playButton.visibility = View.GONE
-        renderer.showBitmap(bitmap)
-        updateStatus()
-    }
-
-    override fun onVideo(width: Int, height: Int) {
-        isVideo = true
-        val scale = min(1f, 1280f / max(width, height))
-        renderer.configureSource(max(1, (width * scale).toInt()), max(1, (height * scale).toInt()), 0)
-        playButton.visibility = View.VISIBLE
-        playButton.text = "Pause"
-    }
-
-    override fun onMediaError(message: String) {
-        toast(message)
-        activeUri = null
-        startSource()
-    }
-
-    override fun onSnapshot(bitmap: Bitmap) {
-        if (isDestroyed || pendingSnapshot != null) { bitmap.recycle(); return }
-        pendingSnapshot = bitmap
-        snapshotButton.isEnabled = false
-        if (Build.VERSION.SDK_INT >= 29) saveBitmap(bitmap)
-        else {
-            try {
-                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE); type = "image/png"; putExtra(Intent.EXTRA_TITLE, SnapshotWriter.fileName())
-                }, SAVE_FILE)
-            } catch (error: android.content.ActivityNotFoundException) {
-                bitmap.recycle(); pendingSnapshot = null; snapshotButton.isEnabled = sourceHasFrame; toast("No save picker available")
-            }
-        }
-    }
-
-    private fun saveBitmap(bitmap: Bitmap, destination: Uri? = null) {
-        snapshotWriting = true
-        snapshotButton.text = "Saving…"
-        io.execute {
-            val result = runCatching { SnapshotWriter.save(this, bitmap, destination) }
-            bitmap.recycle()
-            main.post {
-                pendingSnapshot = null
-                snapshotWriting = false
-                if (!isDestroyed) {
-                    snapshotButton.text = "Save frame"
-                    snapshotButton.isEnabled = sourceHasFrame
-                    toast(if (result.isSuccess) "Image saved" else "Save failed: ${result.exceptionOrNull()?.message}")
-                }
-            }
         }
     }
 
     private fun focusAt(x: Float, y: Float) {
-        if (activeUri != null) return
         val info = cameraInfo ?: return
         val orientation = cameraOrientation(info)
         val (width, height) = orientation.outputSize(info.width, info.height)
@@ -1062,8 +945,6 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
 
     companion object {
         private const val CAMERA_PERMISSION = 10
-        private const val OPEN_FILE = 11
-        private const val SAVE_FILE = 12
         private const val LOCATION_PERMISSION = 13
     }
 }
