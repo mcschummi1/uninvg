@@ -12,6 +12,8 @@ import android.widget.ImageButton
 import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
+import android.os.Looper
+import dev.uninvg.update.AppUpdate
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -19,6 +21,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ActivityController
 import org.robolectric.annotation.Config
@@ -36,6 +39,7 @@ class MainActivityTest {
         org.robolectric.RuntimeEnvironment.getApplication().getSharedPreferences("controls", 0).edit().clear().commit()
         lifecycle = Robolectric.buildActivity(MainActivity::class.java).create().start().resume().visible()
         activity = lifecycle.get()
+        activity.updateFetcher = { null }
     }
 
     @After fun close() { if (::lifecycle.isInitialized) lifecycle.pause().stop().destroy() }
@@ -153,10 +157,32 @@ class MainActivityTest {
         assertTrue(button("15").isSelected)
     }
 
-    @Test fun noInternetOrStoragePermissionsAreDeclared() {
+    @Test fun onlyUpdaterPermissionsWereAddedOnTopOfCameraAndLocation() {
         val info = activity.packageManager.getPackageInfo(activity.packageName, android.content.pm.PackageManager.GET_PERMISSIONS)
-        assertEquals(setOf(android.Manifest.permission.CAMERA, android.Manifest.permission.ACCESS_COARSE_LOCATION,
-            android.Manifest.permission.ACCESS_FINE_LOCATION), info.requestedPermissions.orEmpty().toSet())
+        val requested = info.requestedPermissions.orEmpty().toSet()
+        assertEquals(setOf(android.Manifest.permission.INTERNET, android.Manifest.permission.REQUEST_INSTALL_PACKAGES,
+            "${activity.packageName}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"),
+            requested - setOf(android.Manifest.permission.CAMERA, android.Manifest.permission.ACCESS_COARSE_LOCATION,
+                android.Manifest.permission.ACCESS_FINE_LOCATION))
+    }
+
+    @Test fun updateTabChecksGitHubAndOffersTheNewerReleaseDownload() {
+        activity.updateFetcher = { AppUpdate.ReleaseInfo("9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk") }
+        gear().performClick()
+        button("Update").performClick()
+        assertTrue(views().filterIsInstance<TextView>().any { it.text.toString().contains("Installed · v") })
+        assertFalse(views().filterIsInstance<TextView>().any { it.text.toString().contains("v9.9.9") })
+        button("Check for updates").performClick()
+        eventually { views().filterIsInstance<TextView>().any { it.text.toString().contains("Update v9.9.9 is available") } }
+        assertNotNull(button("Download v9.9.9 & install"))
+    }
+
+    @Test fun launchAutoCheckSurfacesANewerReleaseWithoutUserAction() {
+        activity.updateFetcher = { AppUpdate.ReleaseInfo("9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk") }
+        Shadows.shadowOf(Looper.getMainLooper()).runToEndOfTasks()
+        gear().performClick()
+        button("Update").performClick()
+        eventually { views().filterIsInstance<Button>().any { it.text == "Download v9.9.9 & install" } }
     }
 
     @Test
@@ -262,6 +288,15 @@ class MainActivityTest {
     private fun dialog(): Dialog = ShadowDialog.getLatestDialog()
     private fun gear(): ImageButton = views().filterIsInstance<ImageButton>().single { it.contentDescription == "Settings" }
     private fun button(label: String): Button = views().filterIsInstance<Button>().single { it.text == label }
+    private fun eventually(condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5000
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        assertTrue("update state: ${activity.debugUpdateState()}", condition())
+    }
     private fun views(): List<View> {
         fun collect(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { collect(view.getChildAt(it)) } else emptyList()
         return collect(activity.window.decorView) + (ShadowDialog.getLatestDialog()?.takeIf { it.isShowing }?.window?.decorView?.let { collect(it) } ?: emptyList())

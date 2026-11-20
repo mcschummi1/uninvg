@@ -37,6 +37,7 @@ import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import dev.uninvg.camera.CameraEngine
 import dev.uninvg.camera.CameraInfo
 import dev.uninvg.core.*
@@ -46,6 +47,9 @@ import dev.uninvg.memory.SceneMemoryController
 import dev.uninvg.memory.SceneOverlay
 import dev.uninvg.render.NightRenderer
 import dev.uninvg.render.CameraOrientation
+import dev.uninvg.update.AppUpdate
+import java.io.File
+import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -89,6 +93,14 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private var selectedTab = 0
     private var settingsDialog: Dialog? = null
     private var settingsScroll: ScrollView? = null
+    private var updateRelease: AppUpdate.ReleaseInfo? = null
+    private var updateChecking = false
+    private var updateProgress = -1
+    private var updateMessage: String? = null
+    private var updateStatus: TextView? = null
+    private var updateAutoChecked = false
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    var updateFetcher: (() -> AppUpdate.ReleaseInfo?)? = null
     private val displayManager by lazy { getSystemService(DISPLAY_SERVICE) as DisplayManager }
     private var lastDisplayDegrees = -1
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -229,7 +241,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val color = hudColor()
         sceneLabel.setTextColor(color)
         status.setTextColor(color)
-        gearButton.setColorFilter(color)
+        gearButton.setColorFilter(if (updateReady() != null) accent else color)
         memory.update(settings, color)
     }
 
@@ -259,7 +271,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         header.addView(button("Done") { dialog.dismiss() }, LinearLayout.LayoutParams(dp(76), dp(48)))
         sheet.addView(header)
         tabRow = row()
-        listOf("Image", "Capture", "Color", "Display", "Memory").forEachIndexed { index, title ->
+        listOf("Image", "Capture", "Color", "Display", "Memory", "Update").forEachIndexed { index, title ->
             tabRow.addView(button(title) { showTab(index) }, LinearLayout.LayoutParams(-2, dp(44)))
         }
         sheet.addView(HorizontalScrollView(this).apply { addView(tabRow); isHorizontalScrollBarEnabled = false },
@@ -379,6 +391,24 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
                 }
             }
             4 -> panelContent.addView(memory.panel())
+            5 -> {
+                section("APP UPDATE")
+                panelContent.addView(text("Installed · v${installedVersion()} · mcschummi1/uninvg", 12f, secondary))
+                panelContent.addView(button("Check for updates") { checkForUpdates() },
+                    LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(10) })
+                updateMessage?.let { message -> panelContent.addView(text(message, 11f, secondary)) }
+                updateReady()?.let { release ->
+                    if (updateProgress < 0) {
+                        val download = button("Download v${release.tag} & install") { downloadAndInstall(release) }
+                        download.setTextColor(ink); download.background = rounded(accent, 22)
+                        panelContent.addView(download, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(10) })
+                    }
+                }
+                if (updateProgress >= 0) {
+                    updateStatus = text("Downloading… $updateProgress%", 12f, accent).apply { setPadding(dp(4), dp(10), 0, 0) }
+                    panelContent.addView(updateStatus)
+                }
+            }
         }
         updateButtons()
         settingsScroll?.post { settingsScroll?.scrollTo(0, 0) }
@@ -541,6 +571,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         memory.resume()
         hideSystemBars()
         displayManager.registerDisplayListener(displayListener, main)
+        maybeCheckForUpdate()
         startSource()
         refreshCameraOrientation()
     }
@@ -917,6 +948,114 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
                 (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("UniNVG capabilities", details))
                 toast("Copied")
             }.show()
+    }
+
+    private fun installedVersion() = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "0"
+    } catch (error: PackageManager.NameNotFoundException) { "0" }
+
+    private fun updateReady(): AppUpdate.ReleaseInfo? {
+        val release = updateRelease ?: return null
+        return if (AppUpdate.isNewer(installedVersion(), release.tag)) release else null
+    }
+
+    private fun refreshUpdatePanel() {
+        gearButton.setColorFilter(if (updateReady() != null) accent else hudColor())
+        if (settingsDialog?.isShowing == true && selectedTab == 5) showTab(5)
+    }
+
+    private fun maybeCheckForUpdate() {
+        if (updateAutoChecked || updateChecking || updateProgress >= 0) return
+        updateAutoChecked = true
+        main.postDelayed({ if (resumed && !isFinishing && !isDestroyed) autoCheckForUpdate() }, 1500)
+    }
+
+    private fun autoCheckForUpdate() {
+        if (updateChecking || updateProgress >= 0) return
+        io.execute {
+            val release = try { fetchUpdate() } catch (error: Exception) { null }
+            if (release == null || !AppUpdate.isNewer(installedVersion(), release.tag)) return@execute
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                updateMessage = "Update v${release.tag} available"
+                updateRelease = release
+                applyHudColor()
+                if (settingsDialog?.isShowing == true && selectedTab == 5) showTab(5)
+                toast("UniNVG v${release.tag} is out — open Settings ▸ Update")
+            }
+        }
+    }
+
+    private fun checkForUpdates() {
+        if (updateChecking || updateProgress >= 0) return
+        updateChecking = true
+        updateMessage = "Checking…"
+        refreshUpdatePanel()
+        io.execute {
+            val release = try { fetchUpdate() } catch (error: Exception) { null }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                updateChecking = false
+                updateRelease = release
+                updateMessage = when {
+                    release == null -> "Update check failed — check your connection and try again."
+                    AppUpdate.isNewer(installedVersion(), release.tag) -> "Update v${release.tag} is available"
+                    else -> "Up to date — v${release.tag} is the latest release"
+                }
+                refreshUpdatePanel()
+            }
+        }
+    }
+
+    private fun downloadAndInstall(release: AppUpdate.ReleaseInfo) {
+        if (updateChecking || updateProgress >= 0) return
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            toast("Allow UniNVG to install apps, then tap download again")
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
+        updateProgress = 0
+        refreshUpdatePanel()
+        val destination = File(cacheDir, "update/UniNVG-${release.tag}.apk")
+        io.execute {
+            try {
+                AppUpdate.download(release.apkUrl, destination) { percent ->
+                    main.post {
+                        if (isFinishing || isDestroyed) return@post
+                        updateProgress = percent
+                        updateStatus?.text = "Downloading… $percent%"
+                    }
+                }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    updateProgress = -1
+                    installApk(destination)
+                }
+            } catch (error: IOException) {
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    updateProgress = -1
+                    updateMessage = "Download failed — check your connection and try again."
+                    refreshUpdatePanel()
+                    toast("Download failed")
+                }
+            }
+        }
+    }
+
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    fun debugUpdateState(): String =
+        "checking=$updateChecking progress=$updateProgress release=${updateRelease?.tag} message=$updateMessage"
+
+    private fun fetchUpdate(): AppUpdate.ReleaseInfo? =
+        (updateFetcher ?: { AppUpdate.fetchLatest() })()
+
+    private fun installApk(file: File) {
+        val uri = FileProvider.getUriForFile(this, "dev.uninvg.fileprovider", file)
+        startActivity(Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK))
+        toast("Opening installer — choose Update to finish")
     }
 
     private fun toast(message: String) { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
