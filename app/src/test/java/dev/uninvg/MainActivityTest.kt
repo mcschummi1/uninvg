@@ -5,8 +5,13 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.opengl.GLSurfaceView
+import android.os.BatteryManager
+import android.view.Gravity
+import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.Button
 import android.widget.ImageButton
 import android.widget.SeekBar
@@ -40,6 +45,7 @@ class MainActivityTest {
         lifecycle = Robolectric.buildActivity(MainActivity::class.java).create().start().resume().visible()
         activity = lifecycle.get()
         activity.updateFetcher = { null }
+        activity.updateCatalogFetcher = { emptyList() }
     }
 
     @After fun close() { if (::lifecycle.isInitialized) lifecycle.pause().stop().destroy() }
@@ -128,16 +134,34 @@ class MainActivityTest {
 
     @Test fun cameraPermissionAndUnavailableTorchRemainActionable() {
         assertNotNull(button("Enable camera"))
-        assertFalse(button("Save frame").isEnabled)
         gear().performClick(); button("Capture").performClick()
         assertFalse(views().filterIsInstance<Switch>().single { it.text == "Light" }.isEnabled)
     }
 
-    @Test fun importUsesScopedUserSelectedMedia() {
-        button("Import").performClick()
-        val intent = shadowOf(activity).nextStartedActivityForResult.intent
-        assertEquals(Intent.ACTION_OPEN_DOCUMENT, intent.action)
-        assertArrayEquals(arrayOf("image/*", "video/*"), intent.getStringArrayExtra(Intent.EXTRA_MIME_TYPES))
+    @Test fun viewfinderExposesOnlyTheGearInsteadOfMediaActions() {
+        val labels = views().filterIsInstance<Button>().map { it.text.toString() }
+        assertTrue("Import" !in labels)
+        assertTrue("Save frame" !in labels)
+        assertTrue(views().filterIsInstance<ImageButton>().any { it.contentDescription == "Settings" })
+    }
+
+    @Test fun hudShowsBatteryAndTemperatureReadout() {
+        activity.sendStickyBroadcast(Intent(Intent.ACTION_BATTERY_CHANGED).apply {
+            putExtra(BatteryManager.EXTRA_LEVEL, 87)
+            putExtra(BatteryManager.EXTRA_SCALE, 100)
+            putExtra(BatteryManager.EXTRA_TEMPERATURE, 314)
+        })
+        activity.refreshDeviceInfo()
+        val info = views().filterIsInstance<TextView>().single { it.text.toString().startsWith("Battery") }
+        assertEquals("Battery 87%  \u00b7  Temp 31.4\u00b0C", info.text.toString())
+    }
+
+    @Test fun hudRelocatesToTheRightEdgeWhenHeldLandscape() {
+        val hud = views().filterIsInstance<TextView>().single { it.text == "LOW-LIGHT OPTICS" }.parent as LinearLayout
+        assertEquals(Gravity.TOP or Gravity.START, (hud.layoutParams as FrameLayout.LayoutParams).gravity)
+        shadowOf(activity.windowManager.defaultDisplay).setRotation(Surface.ROTATION_90)
+        activity.refreshCameraOrientation()
+        assertTrue((hud.layoutParams as FrameLayout.LayoutParams).gravity and Gravity.END != 0)
     }
 
     @Test fun closingAndReopeningPreservesSelectedTabAndValues() {
@@ -175,6 +199,18 @@ class MainActivityTest {
         button("Check for updates").performClick()
         eventually { views().filterIsInstance<TextView>().any { it.text.toString().contains("Update v9.9.9 is available") } }
         assertNotNull(button("Download v9.9.9 & install"))
+    }
+
+    @Test fun versionPickerLetsTheUserBrowseAndPickEarlierReleases() {
+        activity.updateCatalogFetcher = { listOf(
+            AppUpdate.ReleaseInfo("0.4.5.5", "https://example.com/UniNVG-0.4.5.5.apk"),
+            AppUpdate.ReleaseInfo("0.3.0", "https://example.com/UniNVG-0.3.0.apk")) }
+        gear().performClick()
+        button("Update").performClick()
+        button("Browse versions").performClick()
+        eventually { views().filterIsInstance<TextView>().map { it.text.toString() }
+            .let { items -> items.any { it.startsWith("v0.4.5.5") && it.contains("installed") } &&
+                items.any { it.startsWith("v0.3.0") && it.contains("older") } } }
     }
 
     @Test fun launchAutoCheckSurfacesANewerReleaseWithoutUserAction() {

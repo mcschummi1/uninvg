@@ -25,14 +25,12 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
         fun onSurface(texture: SurfaceTexture)
         fun onSample(luma: FloatArray, width: Int, height: Int, timestampNs: Long)
         fun onOutput(timestampNs: Long)
-        fun onSnapshot(bitmap: Bitmap)
         fun onRenderError(message: String)
     }
 
     private data class Target(val texture: Int, val framebuffer: Int, val width: Int, val height: Int)
     private val main = Handler(Looper.getMainLooper())
     private val framePending = AtomicBoolean()
-    private val snapshotPending = AtomicBoolean()
     private val vertices: FloatBuffer = ByteBuffer.allocateDirect(16 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
         put(floatArrayOf(-1f, -1f, 0f, 0f, 1f, -1f, 1f, 0f, -1f, 1f, 0f, 1f, 1f, 1f, 1f, 1f)); position(0)
     }
@@ -133,7 +131,6 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
         view.queueEvent { accumulated = 0; lastSample = 0; cadence.reset(); renderDirty = true }
     }
 
-    fun snapshot() { snapshotPending.set(true); view.requestRender() }
 
     override fun onSurfaceCreated(unused: GL10?, config: EGLConfig?) {
         try {
@@ -199,10 +196,6 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
                 renderDirty = false
             }
             drawScreen()
-            if (snapshotPending.getAndSet(false)) {
-                if (output != null && accumulated > 0) saveSnapshot()
-                else main.post { listener.onRenderError("No image to save yet") }
-            }
         } catch (error: RuntimeException) { fail(error) }
     }
 
@@ -323,21 +316,6 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
             GL.glViewport((screenWidth - width) / 2, (screenHeight - height) / 2, width, height)
             useCopy(target.texture)
         }
-    }
-
-    private fun saveSnapshot() {
-        val target = output ?: return
-        bind(target)
-        val pixels = ByteBuffer.allocateDirect(target.width * target.height * 4).order(ByteOrder.nativeOrder())
-        GL.glReadPixels(0, 0, target.width, target.height, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, pixels)
-        val argb = IntArray(target.width * target.height)
-        for (y in 0 until target.height) for (x in 0 until target.width) {
-            val offset = ((target.height - 1 - y) * target.width + x) * 4
-            argb[y * target.width + x] = (255 shl 24) or ((pixels.get(offset).toInt() and 255) shl 16) or
-                ((pixels.get(offset + 1).toInt() and 255) shl 8) or (pixels.get(offset + 2).toInt() and 255)
-        }
-        val bitmap = Bitmap.createBitmap(argb, target.width, target.height, Bitmap.Config.ARGB_8888)
-        main.post { listener.onSnapshot(bitmap) }
     }
 
     private fun useCopy(texture: Int) {
