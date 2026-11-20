@@ -86,18 +86,27 @@ jobs:
                 -storepass "$KEY_PASS" -keypass "$KEY_PASS" \
                 -dname "CN=UniNVG, OU=UniNVG, O=uninvg, C=US"
               echo "Saving signing key to the internal draft-release vault"
-              HAS_VAULT=$(printf '%s' "$(gh api "repos/$REPO/releases?per_page=100")" | jq -r '[.[] | select(.draft and .tag_name == "uninvg-signing-key")][0].id // empty')
-              if [ -z "$HAS_VAULT" ]; then
+              RID=$(printf '%s' "$(gh api "repos/$REPO/releases?per_page=100")" | jq -r '[.[] | select(.draft and .tag_name == "uninvg-signing-key")][0].id // empty')
+              if [ -z "$RID" ]; then
                 gh api --method POST "repos/$REPO/releases" \
                   -f tag_name="uninvg-signing-key" \
                   -f name="UniNVG signing key (internal, do not publish)" \
                   -F draft=true \
-                  -f body="Vault holding the app signing key. Keep as draft."
+                  -f body="Vault holding the app signing key. Keep as draft." > /dev/null
               fi
-              gh release upload uninvg-signing-key \
-                keystore/uninvg-release.keystore \
-                keystore/uninvg-signing.properties \
-                --clobber
+              RID=$(printf '%s' "$(gh api "repos/$REPO/releases?per_page=100")" | jq -r '[.[] | select(.draft and .tag_name == "uninvg-signing-key")][0].id')
+              upload_asset() {
+                NAME="$1"
+                FILE="$2"
+                OLD_ASSET=$(gh api "repos/$REPO/releases/$RID/assets?per_page=100" | jq -r --arg n "$NAME" '.[] | select(.name == $n) | .id // empty')
+                if [ -n "$OLD_ASSET" ]; then
+                  gh api --method DELETE "repos/$REPO/releases/assets/$OLD_ASSET" > /dev/null
+                fi
+                gh api --method POST "https://uploads.github.com/repos/$REPO/releases/$RID/assets?name=$NAME" \
+                  -H "Content-Type: application/octet-stream" --input "$FILE" > /dev/null
+              }
+              upload_asset uninvg-release.keystore keystore/uninvg-release.keystore
+              upload_asset uninvg-signing.properties keystore/uninvg-signing.properties
             fi
             KEY_PASS=$(sed -n 's/^KEY_PASS=//p' keystore/uninvg-signing.properties)
             KEY_PASS_KEY="$KEY_PASS"
