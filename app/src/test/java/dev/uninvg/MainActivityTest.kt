@@ -203,13 +203,13 @@ class MainActivityTest {
 
     @Test fun versionPickerLetsTheUserBrowseAndPickEarlierReleases() {
         activity.updateCatalogFetcher = { listOf(
-            AppUpdate.ReleaseInfo("0.4.5.5", "https://example.com/UniNVG-0.4.5.5.apk"),
+            AppUpdate.ReleaseInfo("0.5.0", "https://example.com/UniNVG-0.5.0.apk"),
             AppUpdate.ReleaseInfo("0.3.0", "https://example.com/UniNVG-0.3.0.apk")) }
         gear().performClick()
         button("Update").performClick()
         button("Browse versions").performClick()
         eventually { views().filterIsInstance<TextView>().map { it.text.toString() }
-            .let { items -> items.any { it.startsWith("v0.4.5.5") && it.contains("installed") } &&
+            .let { items -> items.any { it.startsWith("v0.5.0") && it.contains("installed") } &&
                 items.any { it.startsWith("v0.3.0") && it.contains("older") } } }
     }
 
