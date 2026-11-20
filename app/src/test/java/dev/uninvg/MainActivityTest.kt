@@ -161,7 +161,7 @@ class MainActivityTest {
         val info = activity.packageManager.getPackageInfo(activity.packageName, android.content.pm.PackageManager.GET_PERMISSIONS)
         val requested = info.requestedPermissions.orEmpty().toSet()
         assertEquals(setOf(android.Manifest.permission.INTERNET, android.Manifest.permission.REQUEST_INSTALL_PACKAGES,
-            "$packageName.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"),
+            "${activity.packageName}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"),
             requested - setOf(android.Manifest.permission.CAMERA, android.Manifest.permission.ACCESS_COARSE_LOCATION,
                 android.Manifest.permission.ACCESS_FINE_LOCATION))
     }
