@@ -19,7 +19,13 @@ jobs:
           java-version: "21"
           cache: gradle
       - run: chmod +x gradlew
-      - run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+      - name: Derive version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
+          echo "VERSION_NAME=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$((MAJOR * 1000000 + MINOR * 10000 + PATCH * 100))" >> "$GITHUB_ENV"
+      - run: ./gradlew -PappVersionName="$VERSION_NAME" -PappVersionCode="$VERSION_CODE" testDebugUnitTest lintDebug assembleDebug
       - run: cp app/build/outputs/apk/debug/app-debug.apk "UniNVG-${GITHUB_REF_NAME}.apk"
       - run: gh release create "$GITHUB_REF_NAME" "UniNVG-${GITHUB_REF_NAME}.apk" --generate-notes --verify-tag
         env:

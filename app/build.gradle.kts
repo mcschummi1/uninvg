@@ -10,8 +10,8 @@ android {
         applicationId = "dev.uninvg"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.3.0"
+        versionCode = (project.findProperty("appVersionCode") as String?)?.toInt() ?: 4
+        versionName = (project.findProperty("appVersionName") as String?) ?: "0.3.0"
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }
 
@@ -35,6 +35,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.core:core:1.13.1")
     implementation("androidx.exifinterface:exifinterface:1.4.2")
     compileOnly("androidx.annotation:annotation:1.9.1")
     testImplementation("junit:junit:4.13.2")
