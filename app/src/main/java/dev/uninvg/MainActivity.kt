@@ -241,7 +241,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         val color = hudColor()
         sceneLabel.setTextColor(color)
         status.setTextColor(color)
-        gearButton.setColorFilter(if (updateReady()) accent else color)
+        gearButton.setColorFilter(if (updateReady() != null) accent else color)
         memory.update(settings, color)
     }
 
