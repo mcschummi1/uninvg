@@ -294,7 +294,7 @@ class MainActivityTest {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             Thread.sleep(20)
         }
-        assertTrue(condition())
+        assertTrue("update state: ${activity.debugUpdateState()}", condition())
     }
     private fun views(): List<View> {
         fun collect(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { collect(view.getChildAt(it)) } else emptyList()

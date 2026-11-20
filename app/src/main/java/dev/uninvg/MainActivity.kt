@@ -973,7 +973,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
     private fun autoCheckForUpdate() {
         if (updateChecking || updateProgress >= 0) return
         io.execute {
-            val release = try { fetchUpdate() } catch (error: IOException) { null }
+            val release = try { fetchUpdate() } catch (error: Exception) { null }
             if (release == null || !AppUpdate.isNewer(installedVersion(), release.tag)) return@execute
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -992,7 +992,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
         updateMessage = "Checking…"
         refreshUpdatePanel()
         io.execute {
-            val release = try { fetchUpdate() } catch (error: IOException) { null }
+            val release = try { fetchUpdate() } catch (error: Exception) { null }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 updateChecking = false
@@ -1042,6 +1042,10 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener, 
             }
         }
     }
+
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    fun debugUpdateState(): String =
+        "checking=$updateChecking progress=$updateProgress release=${updateRelease?.tag} message=$updateMessage"
 
     private fun fetchUpdate(): AppUpdate.ReleaseInfo? =
         (updateFetcher ?: { AppUpdate.fetchLatest() })()
