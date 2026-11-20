@@ -45,6 +45,7 @@ class MainActivityTest {
         lifecycle = Robolectric.buildActivity(MainActivity::class.java).create().start().resume().visible()
         activity = lifecycle.get()
         activity.updateFetcher = { null }
+        activity.updateCatalogFetcher = { emptyList() }
     }
 
     @After fun close() { if (::lifecycle.isInitialized) lifecycle.pause().stop().destroy() }
@@ -198,6 +199,17 @@ class MainActivityTest {
         button("Check for updates").performClick()
         eventually { views().filterIsInstance<TextView>().any { it.text.toString().contains("Update v9.9.9 is available") } }
         assertNotNull(button("Download v9.9.9 & install"))
+    }
+
+    @Test fun versionPickerLetsTheUserBrowseAndPickEarlierReleases() {
+        activity.updateCatalogFetcher = { listOf(
+            AppUpdate.ReleaseInfo("0.4.5.5", "https://example.com/UniNVG-0.4.5.5.apk"),
+            AppUpdate.ReleaseInfo("0.3.0", "https://example.com/UniNVG-0.3.0.apk")) }
+        gear().performClick()
+        button("Browse versions").performClick()
+        val items = views().filterIsInstance<TextView>().map { it.text.toString() }
+        assertTrue(items.any { it.startsWith("v0.4.5.5") && it.contains("installed") })
+        assertTrue(items.any { it.startsWith("v0.3.0") && it.contains("older") })
     }
 
     @Test fun launchAutoCheckSurfacesANewerReleaseWithoutUserAction() {

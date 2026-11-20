@@ -97,8 +97,12 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     private var updateMessage: String? = null
     private var updateStatus: TextView? = null
     private var updateAutoChecked = false
+    private var updateCatalog: List<AppUpdate.ReleaseInfo> = emptyList()
+    private var catalogLoading = false
     @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
     var updateFetcher: (() -> AppUpdate.ReleaseInfo?)? = null
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    var updateCatalogFetcher: (() -> List<AppUpdate.ReleaseInfo>)? = null
     private val displayManager by lazy { getSystemService(DISPLAY_SERVICE) as DisplayManager }
     private var lastDisplayDegrees = -1
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -380,6 +384,9 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
                 panelContent.addView(text("Installed · v${installedVersion()} · mcschummi1/uninvg", 12f, secondary))
                 panelContent.addView(button("Check for updates") { checkForUpdates() },
                     LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(10) })
+                panelContent.addView(button("Browse versions") { browseVersions() },
+                    LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(10) })
+                if (catalogLoading) panelContent.addView(text("Loading releases…", 11f, secondary))
                 updateMessage?.let { message -> panelContent.addView(text(message, 11f, secondary)) }
                 updateReady()?.let { release ->
                     if (updateProgress < 0) {
@@ -930,8 +937,53 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     fun debugUpdateState(): String =
         "checking=$updateChecking progress=$updateProgress release=${updateRelease?.tag} message=$updateMessage"
 
+    private fun browseVersions() {
+        if (catalogLoading) return
+        val known = updateCatalog
+        if (known.isNotEmpty()) {
+            showVersionPicker(known)
+            return
+        }
+        catalogLoading = true
+        refreshUpdatePanel()
+        io.execute {
+            val releases = try { fetchCatalog() } catch (error: Exception) { emptyList() }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                catalogLoading = false
+                if (releases.isNotEmpty()) updateCatalog = releases
+                refreshUpdatePanel()
+                if (releases.isEmpty()) toast("Could not load releases — check your connection")
+                else showVersionPicker(releases)
+            }
+        }
+    }
+
+    private fun showVersionPicker(releases: List<AppUpdate.ReleaseInfo>) {
+        val installed = installedVersion()
+        val labels = releases.map { release ->
+            val marker = when {
+                AppUpdate.isNewer(installed, release.tag) -> " · newer"
+                AppUpdate.isNewer(release.tag, installed) -> " · older"
+                else -> " · installed"
+            }
+            "v${release.tag}$marker"
+        }
+        AlertDialog.Builder(this).setTitle("Install a version")
+            .setItems(labels.toTypedArray()) { _, which ->
+                val chosen = releases[which]
+                if (!AppUpdate.isNewer(chosen.tag, installed)) downloadAndInstall(chosen)
+                else toast("Android blocks downgrades — uninstall UniNVG first to go back to v${chosen.tag}")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun fetchUpdate(): AppUpdate.ReleaseInfo? =
         (updateFetcher ?: { AppUpdate.fetchLatest() })()
+
+    private fun fetchCatalog(): List<AppUpdate.ReleaseInfo> =
+        (updateCatalogFetcher ?: { AppUpdate.fetchCatalog() })()
 
     private fun installApk(file: File) {
         val uri = FileProvider.getUriForFile(this, "dev.uninvg.fileprovider", file)

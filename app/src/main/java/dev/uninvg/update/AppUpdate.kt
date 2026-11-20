@@ -8,6 +8,7 @@ import java.net.URL
 object AppUpdate {
     const val REPO = "mcschummi1/uninvg"
     const val LATEST_RELEASE_URL = "https://api.github.com/repos/$REPO/releases/latest"
+    const val RELEASES_URL = "https://api.github.com/repos/$REPO/releases?per_page=30"
 
     data class ReleaseInfo(val tag: String, val apkUrl: String)
 
@@ -31,16 +32,47 @@ object AppUpdate {
         return ReleaseInfo(normalize(tag), apk)
     }
 
-    fun fetchLatest(timeoutMs: Int = 8_000): ReleaseInfo? {
-        val connection = URL(LATEST_RELEASE_URL).openConnection() as HttpURLConnection
+    fun fetchLatest(timeoutMs: Int = 8_000): ReleaseInfo? = parseRelease(fetchJson(LATEST_RELEASE_URL, timeoutMs))
+
+    fun fetchCatalog(timeoutMs: Int = 8_000): List<ReleaseInfo> {
+        val releases = parseReleases(fetchJson(RELEASES_URL, timeoutMs))
+        val latest = parseRelease(fetchJson(LATEST_RELEASE_URL, timeoutMs))
+        return if (latest != null && releases.none { it.tag == latest.tag }) releases + latest else releases
+    }
+
+    fun parseReleases(json: String): List<ReleaseInfo> {
+        val pattern = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"|\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"")
+        val releases = mutableListOf<ReleaseInfo>()
+        var tag: String? = null
+        var apk: String? = null
+        fun flush() {
+            val currentTag = tag
+            val currentApk = apk
+            if (currentTag != null && currentApk != null) releases.add(ReleaseInfo(normalize(currentTag), currentApk))
+            tag = null
+            apk = null
+        }
+        for (match in pattern.findAll(json)) {
+            val tagValue = match.groupValues[1]
+            val apkValue = match.groupValues[2]
+            if (tagValue.isNotEmpty()) {
+                flush()
+                tag = tagValue
+            } else if (apkValue.isNotEmpty() && apk == null) apk = apkValue
+        }
+        flush()
+        return releases
+    }
+
+    private fun fetchJson(url: String, timeoutMs: Int): String {
+        val connection = URL(url).openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = timeoutMs
             connection.readTimeout = timeoutMs
             connection.setRequestProperty("Accept", "application/vnd.github+json")
             connection.setRequestProperty("User-Agent", "UniNVG-updater")
             if (connection.responseCode != 200) throw IOException("GitHub API responded ${connection.responseCode}")
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            return parseRelease(body)
+            return connection.inputStream.bufferedReader().use { it.readText() }
         } finally {
             connection.disconnect()
         }

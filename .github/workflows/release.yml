@@ -22,9 +22,9 @@ jobs:
       - name: Derive version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          IFS=. read -r MAJOR MINOR PATCH <<< "$VERSION"
+          IFS=. read -r MAJOR MINOR PATCH BUILD <<< "$VERSION"
           echo "VERSION_NAME=$VERSION" >> "$GITHUB_ENV"
-          echo "VERSION_CODE=$((MAJOR * 1000000 + MINOR * 10000 + PATCH * 100))" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$((MAJOR * 1000000 + MINOR * 10000 + PATCH * 100 + BUILD))" >> "$GITHUB_ENV"
       - name: Decode signing keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.UNINVG_KEYSTORE_BASE64 }}

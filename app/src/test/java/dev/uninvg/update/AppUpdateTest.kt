@@ -56,4 +56,22 @@ class AppUpdateTest {
         assertNull(AppUpdate.parseRelease("{\"message\":\"Not Found\"}"))
         assertNull(AppUpdate.parseRelease("""{"tag_name":"v0.4.0","assets":[]}"""))
     }
+    @Test fun releaseCatalogKeepsEveryVersionInNewestFirstOrder() {
+        val json = """
+            [
+              { "tag_name": "v0.4.5.5", "assets": [ { "name": "UniNVG-0.4.5.5.apk", "browser_download_url": "https://example.com/UniNVG-0.4.5.5.apk" } ] },
+              { "tag_name": "v0.4.0", "assets": [ { "name": "UniNVG-0.4.0.apk", "browser_download_url": "https://example.com/UniNVG-0.4.0.apk" } ] },
+              { "tag_name": "v0.3.5", "assets": [ { "name": "notes.zip", "browser_download_url": "https://example.com/notes.zip" } ] }
+            ]
+        """.trimIndent()
+        val releases = AppUpdate.parseReleases(json)
+        assertEquals(listOf("0.4.5.5", "0.4.0"), releases.map { it.tag })
+        assertEquals("https://example.com/UniNVG-0.4.0.apk", releases[1].apkUrl)
+    }
+
+    @Test fun emptyOrBrokenCatalogsAreEmpty() {
+        assertTrue(AppUpdate.parseReleases("").isEmpty())
+        assertTrue(AppUpdate.parseReleases("[]").isEmpty())
+        assertTrue(AppUpdate.parseReleases("{\"message\":\"Not Found\"}").isEmpty())
+    }
 }
