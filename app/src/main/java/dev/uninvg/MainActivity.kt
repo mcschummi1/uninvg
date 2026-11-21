@@ -336,11 +336,14 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
                     section("MANUAL SENSOR")
                     val caps = cameraInfo?.caps
                     if (caps?.manualSensor == true) {
+                        toggle("Assist · decide from the view", settings.assist) { changeSettings(settings.copy(assist = it)) }
                         logSlider("Shutter", settings.manualShutterNs.toDouble(), caps.exposureMinNs.toDouble(),
                             ExposurePlanner.maxExposureNs(caps, settings.fps).toDouble(), { formatShutter(it.toLong()) }) {
+                            manualTouched()
                             changeSettings(settings.copy(manualShutterNs = it.toLong()))
                         }
                         logSlider("ISO", settings.manualIso.toDouble(), caps.isoMin.toDouble(), caps.isoMax.toDouble(), { it.toInt().toString() }) {
+                            manualTouched()
                             changeSettings(settings.copy(manualIso = it.toInt()))
                         }
                         caps.maxAnalogIso?.let { iso -> panelContent.addView(text("Analog gain ceiling · ISO $iso", 11f, secondary)) }
@@ -387,8 +390,8 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
                     panelContent.addView(text("Root · su available", 11f, accent).apply { setPadding(dp(4), dp(10), 0, 0) })
                 }
                 section("DEDICATED VERSION")
-                val choices = listOf("Auto", "S24 · Exynos", "S22 · Exynos", "A71", "J3", "Universal")
-                val ids: List<ProfileId?> = listOf(null, ProfileId.S24_EXYNOS, ProfileId.S22_EXYNOS, ProfileId.A71, ProfileId.J3_2017, ProfileId.UNIVERSAL)
+                val choices = listOf("Auto", "S24 · Exynos", "S22 · Exynos", "J3", "A71", "Universal")
+                val ids: List<ProfileId?> = listOf(null, ProfileId.S24_EXYNOS, ProfileId.S22_EXYNOS, ProfileId.J3_2017, ProfileId.A71, ProfileId.UNIVERSAL)
                 chips(choices, ids.indexOf(forcedProfile())) { position ->
                     preferences.edit().putInt("profile", ids[position]?.ordinal ?: -1).apply()
                     startSource()
@@ -549,10 +552,20 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
             .putFloat("bias", settings.exposureBias).putFloat("gain", settings.digitalGain).putFloat("gamma", settings.gamma)
             .putFloat("denoise", settings.denoise).putInt("stack", settings.stackDepth).putInt("palette", settings.palette.ordinal)
             .putBoolean("regional", settings.regional).putInt("resolution", settings.resolution).putBoolean("vr", settings.vr)
-            .putInt("manualIso", settings.manualIso).putLong("manualShutterNs", settings.manualShutterNs).apply()
+            .putInt("manualIso", settings.manualIso).putLong("manualShutterNs", settings.manualShutterNs)
+            .putBoolean("assist", settings.assist).apply()
         applyHudColor()
         updateStatus()
         updateButtons()
+    }
+
+    private fun applyAssist(suggestion: ManualAssist.Suggestion) {
+        val now = clock()
+        if (now - lastManualTouchMs < 3000 || now - lastAssistApplyMs < 1000) return
+        if (suggestion.shutterNs == settings.manualShutterNs && suggestion.iso == settings.manualIso) return
+        lastAssistApplyMs = now
+        changeSettings(settings.copy(manualShutterNs = suggestion.shutterNs, manualIso = suggestion.iso))
+        if (settingsDialog?.isShowing == true && selectedTab == 1) showTab(1)
     }
 
     private fun manualExposure(): Double = settings.manualShutterNs.toDouble() * settings.manualIso
@@ -571,6 +584,13 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     private val rootPaths = listOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su", "/system/sd/xbin/su", "/vendor/bin/su")
     private fun rootAvailable(): Boolean = rootPaths.any { runCatching { java.io.File(it).exists() }.getOrDefault(false) }
 
+    private var lastManualTouchMs = 0L
+    private var lastAssistApplyMs = 0L
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    internal var clock: () -> Long = { android.os.SystemClock.uptimeMillis() }
+
+    private fun manualTouched() { lastManualTouchMs = clock() }
+
     @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
     internal fun forcedProfile(): ProfileId? =
         try {
@@ -584,7 +604,8 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
             digitalGain = preferences.getFloat("gain", 1f), gamma = preferences.getFloat("gamma", 1f),
             denoise = preferences.getFloat("denoise", 0.45f), stackDepth = preferences.getInt("stack", 4),
             palette = Palette.entries[preferences.getInt("palette", 1)], regional = preferences.getBoolean("regional", false),
-            manualIso = preferences.getInt("manualIso", 800), manualShutterNs = preferences.getLong("manualShutterNs", 100_000_000))
+            manualIso = preferences.getInt("manualIso", 800), manualShutterNs = preferences.getLong("manualShutterNs", 100_000_000),
+            assist = preferences.getBoolean("assist", true))
     } catch (error: RuntimeException) { NvSettings() }
 
     override fun onResume() {
@@ -762,10 +783,14 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
                 try {
                     val stats = SceneAnalyzer.analyze(luma, width, height)
                     val decision = controller.update(stats, metadata, plan, capturedSettings, timestampNs, false, gainCeiling)
+                    val assistCaps = info?.caps?.takeIf { it.manualSensor }
+                    val assist = if (!capturedSettings.automatic && capturedSettings.assist && assistCaps != null)
+                        ManualAssist.suggest(stats, assistCaps, capturedSettings, capturedSettings.exposureBias) else null
                     main.post {
                         if (epoch != analysisEpoch || !resumed) return@post
                         scene = stats.kind
                         enhancement = decision.enhancement
+                        assist?.let { applyAssist(it) }
                         if (info != null && settings.automatic && metadata != null) {
                             val changed = abs(kotlin.math.ln(decision.exposureProduct / exposureProduct)) > 0.06
                             exposureProduct = decision.exposureProduct

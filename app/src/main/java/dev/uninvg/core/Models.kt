@@ -25,7 +25,8 @@ data class NvSettings(
     val stackDepth: Int = 4,
     val palette: Palette = Palette.GREEN,
     val regional: Boolean = false,
-    val torch: Boolean = false
+    val torch: Boolean = false,
+    val assist: Boolean = true
 ) {
     init {
         require(fps in SUPPORTED_FPS)

@@ -308,6 +308,8 @@ class MainActivityTest {
         renderSettings("manual-sensor-settings")
         button("Memory").performClick()
         renderSettings("memory-settings")
+        button("Device").performClick()
+        renderSettings("device-settings")
     }
 
     private fun cameraInfo(manual: Boolean): dev.uninvg.camera.CameraInfo {
