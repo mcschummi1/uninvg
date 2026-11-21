@@ -259,7 +259,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         header.addView(button("Done") { dialog.dismiss() }, LinearLayout.LayoutParams(dp(76), dp(48)))
         sheet.addView(header)
         tabRow = row()
-        listOf("Image", "Capture", "Color", "Display", "Memory", "Update").forEachIndexed { index, title ->
+        listOf("Image", "Capture", "Color", "Display", "Memory", "Device", "Update").forEachIndexed { index, title ->
             tabRow.addView(button(title) { showTab(index) }, LinearLayout.LayoutParams(-2, dp(44)))
         }
         sheet.addView(HorizontalScrollView(this).apply { addView(tabRow); isHorizontalScrollBarEnabled = false },
@@ -380,6 +380,23 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
             }
             4 -> panelContent.addView(memory.panel())
             5 -> {
+                section("DETECTED DEVICE")
+                panelContent.addView(text(cameraInfo?.profile?.label ?: "Universal · camera not ready", 14f, primary))
+                panelContent.addView(text(deviceSummary(), 11f, secondary).apply { setPadding(dp(4), dp(8), 0, 0) })
+                if (rootAvailable()) {
+                    panelContent.addView(text("Root · su available", 11f, accent).apply { setPadding(dp(4), dp(10), 0, 0) })
+                }
+                section("DEDICATED VERSION")
+                val choices = listOf("Auto", "S24 · Exynos", "S22 · Exynos", "A71", "J3", "Universal")
+                val ids: List<ProfileId?> = listOf(null, ProfileId.S24_EXYNOS, ProfileId.S22_EXYNOS, ProfileId.A71, ProfileId.J3_2017, ProfileId.UNIVERSAL)
+                chips(choices, ids.indexOf(forcedProfile())) { position ->
+                    preferences.edit().putInt("profile", ids[position]?.ordinal ?: -1).apply()
+                    startSource()
+                    showTab(5)
+                }
+                panelContent.addView(text("Auto follows the phone. A pinned profile keeps its tuning on every boot; exposure always adapts to the scene.", 11f, secondary).apply { setPadding(dp(4), dp(10), 0, 0) })
+            }
+            6 -> {
                 section("APP UPDATE")
                 panelContent.addView(text("Installed · v${installedVersion()} · mcschummi1/uninvg", 12f, secondary))
                 panelContent.addView(button("Check for updates") { checkForUpdates() },
@@ -540,6 +557,26 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
 
     private fun manualExposure(): Double = settings.manualShutterNs.toDouble() * settings.manualIso
 
+    private fun deviceSummary(): String {
+        val info = cameraInfo ?: return "${identity.manufacturer} ${identity.model}\nCamera has not been opened yet."
+        val caps = info.caps
+        return buildString {
+            appendLine("${identity.manufacturer} ${identity.model} · stream ${info.width}×${info.height}")
+            appendLine(if (caps.manualSensor) "Manual sensor · ISO ${caps.isoMin}–${caps.isoMax}" else "No manual sensor · auto-exposure camera")
+            appendLine("Auto gain ceiling · ${info.profile.gainCeiling.toInt()}× · Denoise tune · ×${info.profile.denoiseBias}")
+            appendLine("Temporal stack limit · ${info.profile.maxStackDepth}× · OIS preferred · ${info.profile.preferOis}")
+        }.trimEnd()
+    }
+
+    private val rootPaths = listOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su", "/system/sd/xbin/su", "/vendor/bin/su")
+    private fun rootAvailable(): Boolean = rootPaths.any { runCatching { java.io.File(it).exists() }.getOrDefault(false) }
+
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    internal fun forcedProfile(): ProfileId? =
+        try {
+            preferences.getInt("profile", -1).takeIf { it >= 0 }?.let { ProfileId.entries[it] }
+        } catch (_: RuntimeException) { null }
+
     private fun restoreSettings(): NvSettings = try {
         NvSettings(fps = try { preferences.getFloat("fps", 15f) } catch (_: ClassCastException) { preferences.getInt("fps", 15).toFloat() },
             resolution = preferences.getInt("resolution", 720), vr = preferences.getBoolean("vr", false),
@@ -603,7 +640,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         renderer.update(settings, enhancement)
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             showPlaceholder("Opening camera…", false)
-            camera.start(surface, identity, settings)
+            camera.start(surface, identity, settings, forcedProfile())
         } else showPlaceholder("See further into the dark", true)
         updateButtons()
     }
@@ -649,6 +686,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         lastCameraError = null
         configureCameraSource(info)
         renderer.setProfile(info.profile.maxStackDepth, info.profile.motionThreshold)
+        renderer.setDenoiseBias(info.profile.denoiseBias)
         if (settings.stackDepth > info.profile.maxStackDepth) settings = settings.copy(stackDepth = info.profile.maxStackDepth)
         exposureProduct = 10_000_000L.coerceIn(info.caps.exposureMinNs, info.caps.exposureMaxNs).toDouble() * info.caps.isoMin
         camera.update(settings, if (settings.automatic) exposureProduct else manualExposure())
@@ -719,10 +757,11 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
             val metadata = captures[timestampNs]
             val plan = if (info == null) CapturePlan(false, 1, 100, frameBudgetNs(settings.fps), null, settings.fps, false, true)
                 else ExposurePlanner.plan(info.caps, settings, exposureProduct)
+            val gainCeiling = info?.profile?.gainCeiling ?: 16f
             analysis.execute {
                 try {
                     val stats = SceneAnalyzer.analyze(luma, width, height)
-                    val decision = controller.update(stats, metadata, plan, capturedSettings, timestampNs, false)
+                    val decision = controller.update(stats, metadata, plan, capturedSettings, timestampNs, false, gainCeiling)
                     main.post {
                         if (epoch != analysisEpoch || !resumed) return@post
                         scene = stats.kind
@@ -851,7 +890,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
 
     private fun refreshUpdatePanel() {
         gearButton.setColorFilter(if (updateReady() != null) accent else hudColor())
-        if (settingsDialog?.isShowing == true && selectedTab == 5) showTab(5)
+        if (settingsDialog?.isShowing == true && selectedTab == 6) showTab(6)
     }
 
     private fun maybeCheckForUpdate() {
@@ -870,7 +909,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
                 updateMessage = "Update v${release.tag} available"
                 updateRelease = release
                 applyHudColor()
-                if (settingsDialog?.isShowing == true && selectedTab == 5) showTab(5)
+                if (settingsDialog?.isShowing == true && selectedTab == 6) showTab(6)
                 toast("UniNVG v${release.tag} is out — open Settings ▸ Update")
             }
         }

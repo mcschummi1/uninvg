@@ -18,6 +18,7 @@ import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.os.Looper
+import dev.uninvg.core.ProfileId
 import dev.uninvg.update.AppUpdate
 import org.junit.After
 import org.junit.Assert.*
@@ -211,6 +212,21 @@ class MainActivityTest {
         eventually { views().filterIsInstance<TextView>().map { it.text.toString() }
             .let { items -> items.any { it.startsWith("v0.5.0") && it.contains("installed") } &&
                 items.any { it.startsWith("v0.3.0") && it.contains("older") } } }
+    }
+
+    @Test fun deviceTabPinsDedicatedProfilesAndExposureStaysAdaptive() {
+        gear().performClick()
+        button("Device").performClick()
+        assertNotNull(button("S24 · Exynos"))
+        assertEquals("Auto", (views().filterIsInstance<Button>().first { it.text == "Auto" }).text)
+        button("S24 · Exynos").performClick()
+        eventually { activity.forcedProfile() == ProfileId.S24_EXYNOS }
+        eventually {
+            val tab = views().filterIsInstance<TextView>().map { it.text.toString() }
+            tab.any { it.contains("exposure always adapts") }
+        }
+        button("Auto").performClick()
+        eventually { activity.forcedProfile() == null }
     }
 
     @Test fun launchAutoCheckSurfacesANewerReleaseWithoutUserAction() {

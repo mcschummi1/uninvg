@@ -71,8 +71,15 @@ data class DeviceProfile(
     val previewLongEdge: Int,
     val maxStackDepth: Int,
     val motionThreshold: Float,
-    val preferOis: Boolean
-)
+    val preferOis: Boolean,
+    val gainCeiling: Float = 16f,
+    val denoiseBias: Float = 1f
+) {
+    init {
+        require(gainCeiling.isFinite() && gainCeiling in 1f..16f)
+        require(denoiseBias.isFinite() && denoiseBias in 0.5f..2f)
+    }
+}
 
 data class CapturePlan(
     val manual: Boolean,

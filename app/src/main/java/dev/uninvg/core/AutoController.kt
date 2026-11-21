@@ -28,7 +28,8 @@ class AutoController {
         plan: CapturePlan,
         settings: NvSettings,
         timestampNs: Long,
-        stillImage: Boolean = false
+        stillImage: Boolean = false,
+        gainCeiling: Float = 16f
     ): AutoDecision {
         validate(stats, plan, timestampNs)
         val plannedProduct = plan.exposureNs.toDouble() * plan.iso
@@ -72,7 +73,7 @@ class AutoController {
                     val detail = stats.edgeEnergy / (stats.noise + 0.002)
                     val detailCeiling = 2.0 + 6.0 * detail / (detail + 1.0)
                     val noiseCeiling = (8.0 / (1.0 + 32.0 * stats.noise)).coerceAtLeast(1.25)
-                    2.0.pow(errorEv).coerceIn(1.0, min(detailCeiling, noiseCeiling))
+                    2.0.pow(errorEv).coerceIn(1.0, min(detailCeiling, min(noiseCeiling, gainCeiling.toDouble())))
                 }
                 measured != null || errorEv < -0.10 -> 1.0
                 else -> 2.0.pow(gainEv)
@@ -80,7 +81,8 @@ class AutoController {
             gainEv = if (stillImage) log2(desiredGain)
                 else gainEv + (log2(desiredGain) - gainEv).coerceIn(-3.0 * elapsed, elapsed)
         }
-        val gain = max(settings.digitalGain.toDouble(), 2.0.pow(gainEv)).coerceIn(1.0, 16.0).toFloat()
+        val gain = max(settings.digitalGain.toDouble(), 2.0.pow(gainEv).coerceAtMost(max(1.0, gainCeiling.toDouble())))
+            .coerceIn(1.0, 16.0).toFloat()
         val regions = regionalGains(stats.tiles, gain, settings.regional)
         val smoothedRegions = if (!settings.regional || previous == null || stillImage) regions else {
             regions.mapIndexed { index, value ->
