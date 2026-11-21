@@ -33,6 +33,7 @@ import dev.uninvg.core.DeviceProfile
 import dev.uninvg.core.ExposurePlanner
 import dev.uninvg.core.FpsRange
 import dev.uninvg.core.NvSettings
+import dev.uninvg.core.ProfileId
 import dev.uninvg.core.ProfileSelector
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
@@ -82,7 +83,8 @@ class CameraEngine(context: Context, private val listener: Listener) {
         val generation: Long,
         val texture: SurfaceTexture,
         val identity: DeviceIdentity,
-        var settings: NvSettings
+        var settings: NvSettings,
+        val forcedProfile: ProfileId? = null
     ) {
         var exposureProduct = 1_000_000_000.0
         var candidate: Candidate? = null
@@ -131,13 +133,13 @@ class CameraEngine(context: Context, private val listener: Listener) {
 
     private data class FocusTag(val serial: Long, val trigger: Int)
 
-    fun start(texture: SurfaceTexture, identity: DeviceIdentity, settings: NvSettings) {
+    fun start(texture: SurfaceTexture, identity: DeviceIdentity, settings: NvSettings, forcedProfile: ProfileId? = null) {
         synchronized(gate) {
             if (released) return
             val token = generation.incrementAndGet()
             worker.post {
                 if (!current(token)) return@post
-                desired = Run(token, texture, identity, settings)
+                desired = Run(token, texture, identity, settings, forcedProfile)
                 stoppedCallback = null
                 callbackAttempt = null
                 val old = attempt
@@ -230,10 +232,10 @@ class CameraEngine(context: Context, private val listener: Listener) {
             val candidate = run.candidate ?: selectCamera(service).also { run.candidate = it }
             val initialCaps = capabilities(candidate, 0L)
             val profileIdentity = if (run.retried) DeviceIdentity("", "", "") else run.identity
-            var profile = ProfileSelector.select(profileIdentity, initialCaps)
+            var profile = ProfileSelector.select(profileIdentity, initialCaps, run.forcedProfile)
             var size = selectSize(candidate, if (run.retried) min(360, run.settings.resolution) else run.settings.resolution, run.settings.fps)
             var caps = capabilities(candidate, candidate.durations.getValue(size))
-            val checkedProfile = ProfileSelector.select(profileIdentity, caps)
+            val checkedProfile = ProfileSelector.select(profileIdentity, caps, run.forcedProfile)
             if (checkedProfile != profile) {
                 profile = checkedProfile
                 size = selectSize(candidate, if (run.retried) min(360, run.settings.resolution) else run.settings.resolution, run.settings.fps)

@@ -261,4 +261,15 @@ class AutoControllerTest {
         assertEquals(ae.exposureNs.toDouble() * ae.iso, decision.exposureProduct, 0.0)
         assertNull(CaptureMetadata(0, null, null, null).exposureProduct)
     }
+
+    @Test
+    fun deviceGainCeilingBoundsAutoGainWithoutOverridingTheManualSetting() {
+        val ae = ExposurePlanner.plan(caps.copy(manualSensor = false), settings, Double.MAX_VALUE)
+        val capped = AutoController().update(black, null, ae, settings.copy(digitalGain = 1f), 0, true, 1.5f)
+        assertEquals(1.5f, capped.enhancement.gain, 1e-4f)
+        val userOwn = AutoController().update(black, null, ae, settings.copy(digitalGain = 12f), 0, true, 8f)
+        assertEquals(12f, userOwn.enhancement.gain, 1e-4f)
+        val open = AutoController().update(black, null, ae, settings.copy(digitalGain = 1f), 0, true, 16f)
+        assertTrue(open.enhancement.gain > capped.enhancement.gain)
+    }
 }

@@ -94,8 +94,14 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
         view.requestRender()
     }
 
+    private var denoiseBias = 1f
+
     fun setProfile(stackLimit: Int, threshold: Float) {
         view.queueEvent { maxDepth = stackLimit; motionThreshold = threshold; accumulated = 0 }
+    }
+
+    fun setDenoiseBias(bias: Float) {
+        view.queueEvent { denoiseBias = bias.coerceIn(0.5f, 2f) }
     }
 
     fun update(next: NvSettings, light: Enhancement) {
@@ -281,7 +287,7 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
         GL.glUniform2f(GL.glGetUniformLocation(enhanceProgram, "uTexel"), 1f / output!!.width, 1f / output!!.height)
         GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uGain"), max(enhancement.gain, settings.digitalGain))
         GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uGamma"), settings.gamma)
-        GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uDenoise"), settings.denoise)
+        GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uDenoise"), (settings.denoise * denoiseBias).coerceIn(0f, 1f))
         GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uNoise"), enhancement.noise.coerceIn(0.003f, 0.25f))
         GL.glUniform1i(GL.glGetUniformLocation(enhanceProgram, "uPalette"), settings.palette.ordinal)
         val gains = if (settings.regional) enhancement.regionalGains else List(16) { 1f }

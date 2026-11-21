@@ -54,6 +54,30 @@ class ProfileSelectorTest {
         assertEquals(ProfileId.J3_2017, j3.id)
         assertEquals(640, j3.previewLongEdge)
         assertEquals(4, j3.maxStackDepth)
+        assertTrue(j3.denoiseBias > ProfileSelector.byId(ProfileId.UNIVERSAL).denoiseBias)
+    }
+
+    @Test
+    fun forcedProfileOverridesDetectionWhateverTheHardwareReports() {
+        for (id in ProfileId.entries) {
+            assertEquals(id, ProfileSelector.select(DeviceIdentity("", "", ""), caps.copy(manualSensor = false), id).id)
+        }
+        val forced = ProfileSelector.select(DeviceIdentity("Samsung", "SM-S901B", "Exynos2200"), caps, ProfileId.A71)
+        assertEquals(ProfileId.A71, forced.id)
+    }
+
+    @Test
+    fun tuningStaysAdaptiveBoundariesGrowCleanerTowardFlagships() {
+        val s24 = ProfileSelector.byId(ProfileId.S24_EXYNOS)
+        val s22 = ProfileSelector.byId(ProfileId.S22_EXYNOS)
+        val a71 = ProfileSelector.byId(ProfileId.A71)
+        val j3 = ProfileSelector.byId(ProfileId.J3_2017)
+        for (profile in listOf(s24, s22, a71, j3, ProfileSelector.byId(ProfileId.UNIVERSAL))) {
+            assertTrue(profile.gainCeiling in 8f..16f)
+            assertTrue(profile.denoiseBias in 0.5f..2f)
+        }
+        assertTrue(j3.denoiseBias > s24.denoiseBias)
+        assertTrue(j3.gainCeiling < s24.gainCeiling && a71.gainCeiling <= s22.gainCeiling)
     }
 
     @Test

@@ -20,6 +20,12 @@ jobs:
           cache: gradle
       - run: chmod +x gradlew
       - run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: app/build/reports/ui/
+          if-no-files-found: ignore
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
