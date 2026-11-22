@@ -18,6 +18,7 @@ import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.os.Looper
+import dev.uninvg.core.ProfileId
 import dev.uninvg.update.AppUpdate
 import org.junit.After
 import org.junit.Assert.*
@@ -203,14 +204,29 @@ class MainActivityTest {
 
     @Test fun versionPickerLetsTheUserBrowseAndPickEarlierReleases() {
         activity.updateCatalogFetcher = { listOf(
-            AppUpdate.ReleaseInfo("0.5.0", "https://example.com/UniNVG-0.5.0.apk"),
+            AppUpdate.ReleaseInfo("0.6.0", "https://example.com/UniNVG-0.6.0.apk"),
             AppUpdate.ReleaseInfo("0.3.0", "https://example.com/UniNVG-0.3.0.apk")) }
         gear().performClick()
         button("Update").performClick()
         button("Browse versions").performClick()
         eventually { views().filterIsInstance<TextView>().map { it.text.toString() }
-            .let { items -> items.any { it.startsWith("v0.5.0") && it.contains("installed") } &&
+            .let { items -> items.any { it.startsWith("v0.6.0") && it.contains("installed") } &&
                 items.any { it.startsWith("v0.3.0") && it.contains("older") } } }
+    }
+
+    @Test fun deviceTabPinsDedicatedProfilesAndExposureStaysAdaptive() {
+        gear().performClick()
+        button("Device").performClick()
+        assertNotNull(button("S24 · Exynos"))
+        assertEquals("Auto", (views().filterIsInstance<Button>().first { it.text == "Auto" }).text)
+        button("S24 · Exynos").performClick()
+        eventually { activity.forcedProfile() == ProfileId.S24_EXYNOS }
+        eventually {
+            val tab = views().filterIsInstance<TextView>().map { it.text.toString() }
+            tab.any { it.contains("exposure always adapts") }
+        }
+        button("Auto").performClick()
+        eventually { activity.forcedProfile() == null }
     }
 
     @Test fun launchAutoCheckSurfacesANewerReleaseWithoutUserAction() {
@@ -292,6 +308,8 @@ class MainActivityTest {
         renderSettings("manual-sensor-settings")
         button("Memory").performClick()
         renderSettings("memory-settings")
+        button("Device").performClick()
+        renderSettings("device-settings")
     }
 
     private fun cameraInfo(manual: Boolean): dev.uninvg.camera.CameraInfo {
