@@ -18,6 +18,12 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+      - name: Cache Robolectric android-all jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-android-all-v1
+          restore-keys: robolectric-android-all-
       - name: Restore signing key from cache
         id: keycache
         uses: actions/cache@v4
