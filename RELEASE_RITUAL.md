@@ -7,6 +7,10 @@ The builder (Vibe) owns the execution; the version number belongs to the owner.
 - **Nothing that affects the image may be fixed.** No shutters caps, no locked ISO targets,
   no frozen exposure. The view must follow the light instantly (Cardboard use case).
 - Device priority order: **S24 Exynos → S22 Exynos → J3 → A71 → Universal.**
+- Thermal guardian thresholds: battery ≥ 40 °C warm (48 hot), SoC (CPU zone, GPU fallback) ≥ 60 °C warm
+  (70 hot) — render pacing only, exposure never touched.
+- S24 profile = full ILO (Israel) CSC headroom of everything the hardware reports; the S22 keeps its
+  own profile (no CSC special-casing). CSC is surfaced in the Device tab, never guessed about.
 - App is a pure viewfinder: no capture, no import, full-screen view, semi-transparent gear top-right.
 
 ## 1. Local static checks (no build machine here)

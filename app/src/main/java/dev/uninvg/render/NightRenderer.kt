@@ -11,6 +11,7 @@ import android.os.Looper
 import android.util.Log
 import dev.uninvg.core.Enhancement
 import dev.uninvg.core.NvSettings
+import dev.uninvg.core.ThermalPolicy
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -95,6 +96,8 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
     }
 
     private var denoiseBias = 1f
+    private var detailBias = 1f
+    private var thermalLevel = 0
 
     fun setProfile(stackLimit: Int, threshold: Float) {
         view.queueEvent { maxDepth = stackLimit; motionThreshold = threshold; accumulated = 0 }
@@ -102,6 +105,18 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
 
     fun setDenoiseBias(bias: Float) {
         view.queueEvent { denoiseBias = bias.coerceIn(0.5f, 2f) }
+    }
+
+    fun setDetailBias(bias: Float) {
+        view.queueEvent { detailBias = bias.coerceIn(0.5f, 2f) }
+    }
+
+    fun setThermalLoad(level: Int) {
+        view.queueEvent {
+            thermalLevel = level.coerceIn(0, 2)
+            renderDirty = true
+        }
+        view.requestRender()
     }
 
     fun update(next: NvSettings, light: Enhancement) {
@@ -188,7 +203,7 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
                 }
                 accumulate()
                 bitmapDirty = false
-                val due = isBitmap || cadence.accept(lastTimestamp.coerceAtLeast(0), settings.fps)
+                val due = isBitmap || cadence.accept(lastTimestamp.coerceAtLeast(0), ThermalPolicy.renderFpsCap(thermalLevel, settings.fps))
                 if (due) {
                     enhance()
                     if (!isBitmap && lastTimestamp > 0) {
@@ -271,7 +286,7 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
         matrix(stackProgram)
         bindTexture(stackProgram, "uSource", 0, source!!.texture)
         bindTexture(stackProgram, "uHistory", 1, history[historyIndex]!!.texture)
-        val depth = if (isBitmap) 1 else min(settings.stackDepth, maxDepth)
+        val depth = if (isBitmap) 1 else min(ThermalPolicy.stackCap(thermalLevel, settings.stackDepth), maxDepth)
         GL.glUniform1f(GL.glGetUniformLocation(stackProgram, "uWeight"), if (accumulated == 0) 0f else min(accumulated, depth - 1).toFloat() / min(accumulated + 1, depth))
         GL.glUniform1f(GL.glGetUniformLocation(stackProgram, "uThreshold"), motionThreshold + enhancement.noise * 1.5f)
         quad(stackProgram)
@@ -288,6 +303,7 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
         GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uGain"), max(enhancement.gain, settings.digitalGain))
         GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uGamma"), settings.gamma)
         GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uDenoise"), (settings.denoise * denoiseBias).coerceIn(0f, 1f))
+        GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uSharpen"), sharpenStrength())
         GL.glUniform1f(GL.glGetUniformLocation(enhanceProgram, "uNoise"), enhancement.noise.coerceIn(0.003f, 0.25f))
         GL.glUniform1i(GL.glGetUniformLocation(enhanceProgram, "uPalette"), settings.palette.ordinal)
         val gains = if (settings.regional) enhancement.regionalGains else List(16) { 1f }
@@ -322,6 +338,15 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
             GL.glViewport((screenWidth - width) / 2, (screenHeight - height) / 2, width, height)
             useCopy(target.texture)
         }
+    }
+
+    /** Adaptive detail restore: only once frames have stacked, never amplifies noise, eased on hot silicon. */
+    private fun sharpenStrength(): Float {
+        if (isBitmap || accumulated < 2) return 0f
+        val noiseNorm = enhancement.noise.coerceIn(0.003f, 0.25f) / 0.25f
+        val settled = min(1f, accumulated / 4f)
+        val clean = (1f - noiseNorm).coerceIn(0f, 1f)
+        return (detailBias * 0.75f * clean * settled * ThermalPolicy.sharpenScale(thermalLevel)).coerceIn(0f, 1.5f)
     }
 
     private fun useCopy(texture: Int) {
@@ -451,6 +476,7 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
             uniform float uGain;
             uniform float uGamma;
             uniform float uDenoise;
+            uniform float uSharpen;
             uniform float uNoise;
             uniform int uPalette;
             uniform vec4 uRow0;
@@ -484,9 +510,11 @@ class NightRenderer(private val view: GLSurfaceView, private val listener: Liste
                         weights += w;
                     }
                 }
-                vec3 filtered = mix(center, sum / weights, uDenoise);
+                vec3 blur = sum / weights;
+                vec3 filtered = mix(center, blur, uDenoise);
+                vec3 sharpened = (uSharpen > 0.0) ? clamp(filtered + (center - blur) * uSharpen, 0.0, 1.0) : filtered;
                 float gain = max(0.1, uGain * localGain());
-                vec3 boosted = filtered * gain;
+                vec3 boosted = sharpened * gain;
                 boosted = boosted / (vec3(1.0) + filtered * max(gain - 1.0, 0.0));
                 vec3 color = pow(clamp(boosted, 0.0, 1.0), vec3(1.0 / max(uGamma, 0.25)));
                 float l = lum(color);

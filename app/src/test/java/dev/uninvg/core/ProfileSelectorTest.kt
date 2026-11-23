@@ -11,7 +11,7 @@ class ProfileSelectorTest {
         for (soc in listOf("Exynos2400", "Samsung Exynos 2400", "s5e9945", "")) {
             val profile = ProfileSelector.select(DeviceIdentity("sAmSuNg", "sm-s921b/DS", soc), caps)
             assertEquals(ProfileId.S24_EXYNOS, profile.id)
-            assertEquals(1280, profile.previewLongEdge)
+            assertEquals(1440, profile.previewLongEdge)
             assertEquals(16, profile.maxStackDepth)
             assertTrue(profile.preferOis)
         }
@@ -19,7 +19,7 @@ class ProfileSelectorTest {
             val profile = ProfileSelector.select(DeviceIdentity("Samsung", "SM-S901B", soc), caps)
             assertEquals(ProfileId.S22_EXYNOS, profile.id)
             assertEquals(1280, profile.previewLongEdge)
-            assertEquals(8, profile.maxStackDepth)
+            assertEquals(16, profile.maxStackDepth)
         }
     }
 
@@ -78,6 +78,11 @@ class ProfileSelectorTest {
         }
         assertTrue(j3.denoiseBias > s24.denoiseBias)
         assertTrue(j3.gainCeiling < s24.gainCeiling && a71.gainCeiling <= s22.gainCeiling)
+        for (profile in listOf(s24, s22, a71, j3, ProfileSelector.byId(ProfileId.UNIVERSAL))) {
+            assertTrue(profile.sharpenBias in 0.5f..2f)
+        }
+        assertTrue("S24 gets the strongest detail restore", s24.sharpenBias > s22.sharpenBias)
+        assertTrue("flagships sharpen more than the rest", s22.sharpenBias > ProfileSelector.byId(ProfileId.UNIVERSAL).sharpenBias)
     }
 
     @Test

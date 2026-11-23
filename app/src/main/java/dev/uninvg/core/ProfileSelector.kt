@@ -4,10 +4,10 @@ import java.util.Locale
 
 object ProfileSelector {
     private val universal = DeviceProfile(ProfileId.UNIVERSAL, "Universal", 960, 8, 0.05f, false)
-    private val s24 = DeviceProfile(ProfileId.S24_EXYNOS, "Galaxy S24 · Exynos", 1280, 16, 0.075f, true,
-        gainCeiling = 16f, denoiseBias = 0.8f)
-    private val s22 = DeviceProfile(ProfileId.S22_EXYNOS, "Galaxy S22 · Exynos", 1280, 8, 0.06f, true,
-        gainCeiling = 16f, denoiseBias = 1f)
+    private val s24 = DeviceProfile(ProfileId.S24_EXYNOS, "Galaxy S24 · Exynos", 1440, 16, 0.075f, true,
+        gainCeiling = 16f, denoiseBias = 0.8f, sharpenBias = 1.15f)
+    private val s22 = DeviceProfile(ProfileId.S22_EXYNOS, "Galaxy S22 · Exynos", 1280, 16, 0.06f, true,
+        gainCeiling = 16f, denoiseBias = 1f, sharpenBias = 1.1f)
     private val a71 = DeviceProfile(ProfileId.A71, "Galaxy A71", 960, 8, 0.035f, false,
         gainCeiling = 12f, denoiseBias = 1.1f)
     private val j3 = DeviceProfile(ProfileId.J3_2017, "Galaxy J3 (2017)", 640, 4, 0.045f, false,
