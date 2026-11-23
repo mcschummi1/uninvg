@@ -2,7 +2,7 @@ package dev.uninvg.core
 
 import kotlin.math.max
 
-val SUPPORTED_FPS = listOf(120f, 90f, 60f, 40f, 30f, 25f, 24f, 15f, 10f, 5f, 1f, 0.5f, 0.25f)
+val SUPPORTED_FPS = listOf(120f, 90f, 60f, 50f, 40f, 30f, 25f, 24f, 15f, 10f, 5f, 1f, 0.5f, 0.25f)
 val SUPPORTED_RESOLUTIONS = listOf(360, 480, 720, 1080, 1440, 2160)
 
 fun fpsLabel(fps: Float): String = if (fps < 1f) "1/${(1f / fps).toInt()}" else fps.toInt().toString()

@@ -435,6 +435,10 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
                 if (catalogLoading) panelContent.addView(text("Loading releases…", 11f, secondary))
                 updateMessage?.let { message -> panelContent.addView(text(message, 11f, secondary)) }
                 updateReady()?.let { release ->
+                    release.notes?.let { notes ->
+                        panelContent.addView(text("What's new in v${release.tag}", 11f, accent).apply { setPadding(dp(4), dp(10), 0, dp(2)) })
+                        panelContent.addView(text(notes, 11f, secondary).apply { setPadding(dp(4), dp(2), 0, 0) })
+                    }
                     if (updateProgress < 0) {
                         val download = button("Download v${release.tag} & install") { downloadAndInstall(release) }
                         download.setTextColor(ink); download.background = rounded(accent, 22)
@@ -1135,7 +1139,8 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
                 AppUpdate.isNewer(release.tag, installed) -> " · older"
                 else -> " · installed"
             }
-            "v${release.tag}$marker"
+            val note = release.notes?.lineSequence()?.firstOrNull { it.isNotBlank() }?.let { "  ·  $it" } ?: ""
+            "v${release.tag}$marker$note"
         }
         AlertDialog.Builder(this).setTitle("Install a version")
             .setItems(labels.toTypedArray()) { _, which ->
