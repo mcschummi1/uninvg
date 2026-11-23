@@ -146,6 +146,11 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     /** System thermal status feeds the guardian on modern devices; battery/SoC heat covers the rest. */
     private fun registerThermalStatus() {
         if (Build.VERSION.SDK_INT < 29) return
+        registerThermalStatusModern()
+    }
+
+    @androidx.annotation.RequiresApi(29)
+    private fun registerThermalStatusModern() {
         try {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
             val listener = PowerManager.OnThermalStatusChangedListener { status ->
@@ -649,6 +654,13 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
             assist = preferences.getBoolean("assist", true))
     } catch (error: RuntimeException) { NvSettings() }
 
+    @androidx.annotation.RequiresApi(29)
+    private fun removeThermalStatus() {
+        (thermalStatusListener as? PowerManager.OnThermalStatusChangedListener)?.let { listener ->
+            runCatching { (getSystemService(POWER_SERVICE) as PowerManager).removeThermalStatusListener(listener) }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         resumed = true
@@ -673,9 +685,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
 
     override fun onDestroy() {
         settingsDialog?.dismiss()
-        (thermalStatusListener as? PowerManager.OnThermalStatusChangedListener)?.let { listener ->
-            runCatching { (getSystemService(POWER_SERVICE) as PowerManager).removeThermalStatusListener(listener) }
-        }
+        if (Build.VERSION.SDK_INT >= 29) removeThermalStatus()
         camera.release()
         memory.release()
         analysis.shutdownNow()
