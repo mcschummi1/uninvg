@@ -8,6 +8,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
@@ -134,6 +135,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settings = restoreSettings()
+        applyVrOrientation()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         camera = CameraEngine(this, this)
         buildUi()
@@ -537,10 +539,17 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     private fun rounded(color: Int, radius: Int) = GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
+    /** Cardboard split view assumes the goggles hold the phone sideways, so request landscape even when the system rotation lock would stay portrait. */
+    internal fun applyVrOrientation() {
+        requestedOrientation = if (settings.vr) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+
     private fun changeSettings(next: NvSettings) {
         val resolutionChanged = next.resolution != settings.resolution
         val reanalyze = next.automatic != settings.automatic || next.exposureBias != settings.exposureBias || next.regional != settings.regional || next.digitalGain != settings.digitalGain
+        val vrChanged = next.vr != settings.vr
         settings = next
+        if (vrChanged) applyVrOrientation()
         if (reanalyze) analysis.execute { controller.reset() }
         renderer.update(settings, enhancement)
         if (resolutionChanged) startSource()

@@ -2,6 +2,7 @@ package dev.uninvg
 
 import android.app.Dialog
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.opengl.GLSurfaceView
@@ -104,12 +105,17 @@ class MainActivityTest {
         }
     }
 
-    @Test fun cardboardSplitCanBeEnabledAndPersists() {
+    @Test fun cardboardSplitIsLandscapeOnlyWhileEnabled() {
         gear().performClick(); button("Display").performClick()
         val toggle = views().filterIsInstance<Switch>().single { it.text == "Cardboard split view" }
         assertFalse(toggle.isChecked)
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.requestedOrientation)
         toggle.performClick()
         assertTrue(preferences().getBoolean("vr", false))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, activity.requestedOrientation)
+        toggle.performClick()
+        assertFalse(toggle.isChecked)
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.requestedOrientation)
     }
 
     @Test fun hudContrastTracksEveryPhosphorChoice() {
