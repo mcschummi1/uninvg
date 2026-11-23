@@ -58,6 +58,32 @@ class SceneMemoryController(
     private var sensorEnabled = false
     private var sensorsRunning = false
     private val referenceExpired = Runnable { reference = null; redraw() }
+    private val anchors = mutableListOf<ArAnchor>()
+    private var nextAnchorId = 1L
+    private var horizonOn = preferences.getBoolean("horizon", false)
+    private var autoCapture = preferences.getBoolean("autoCapture", true)
+    private var lastAutoPatchMs = 0L
+
+    fun setAutoCapture(enabled: Boolean) { autoCapture = enabled; preferences.edit().putBoolean("autoCapture", enabled).apply(); refreshPanel() }
+    fun autoCaptureEnabled() = autoCapture
+    fun setHorizon(enabled: Boolean) { horizonOn = enabled; preferences.edit().putBoolean("horizon", enabled).apply(); redraw() }
+    fun horizonEnabled() = horizonOn
+    fun anchorCount() = anchors.size
+
+    /** Drop an AR pin straight ahead on a world ray; find it again from any angle, edge ticks guide the turn. */
+    fun dropAnchor() {
+        val camera = info
+        val pose = camera?.let { sensors.pose(display, it.frontFacing) }
+        if (pose == null) { toast("Hold the phone steady first"); return }
+        if (anchors.size >= ArHud.MAX_ANCHORS) { toast("Anchor limit reached — clear some first"); return }
+        val anchor = ArAnchor(nextAnchorId, pose.forward, "P$nextAnchorId")
+        nextAnchorId++
+        anchors.add(anchor)
+        redraw()
+        refreshPanel()
+    }
+
+    fun clearAnchors() { anchors.clear(); redraw(); refreshPanel() }
 
     fun camera(camera: CameraInfo?, displayDegrees: Int) {
         generation++
@@ -118,6 +144,7 @@ class SceneMemoryController(
                         main.removeCallbacks(referenceExpired)
                         main.postDelayed(referenceExpired, 1500)
                         redraw()
+                        maybeAutoCapture()
                     }
                 }
             } catch (error: RuntimeException) {
@@ -150,9 +177,29 @@ class SceneMemoryController(
         }
         container.addView(location)
         if (useLocation() && !sensors.hasLocationPermission()) container.addView(action("Allow location") { requestLocation() })
+        container.addView(Switch(activity).apply {
+            text = "Coach · auto-capture while steady"
+            textSize = 13f
+            setTextColor(Color.rgb(235, 242, 236))
+            isChecked = autoCapture
+            minHeight = dp(48)
+            setOnCheckedChangeListener { _, enabled -> setAutoCapture(enabled) }
+        })
+        container.addView(text("AR OVERLAY"))
+        container.addView(Switch(activity).apply {
+            text = "Horizon line"
+            textSize = 13f
+            setTextColor(Color.rgb(235, 242, 236))
+            isChecked = horizonOn
+            minHeight = dp(48)
+            setOnCheckedChangeListener { _, enabled -> setHorizon(enabled) }
+        })
+        container.addView(action("Drop anchor here") { dropAnchor() })
+        container.addView(action(if (anchors.isEmpty()) "Clear anchors" else "Clear anchors · ${anchors.size}") { clearAnchors() })
         if (saving) container.addView(text("Saving scene…"))
         else if (draft != null) {
             container.addView(text("${draft!!.size}/24 views · same position"))
+            container.addView(text("Coach · ${coachMessage().ifEmpty { "hold steady" }}"))
             container.addView(action("Add view") { addView() })
             container.addView(action("Finish scene") { finish() })
             container.addView(action("Cancel capture") { draft = null; draftPlace = null; redraw(); refreshPanel() })
@@ -191,16 +238,62 @@ class SceneMemoryController(
 
     private fun addView() {
         val patches = draft ?: return
-        val current = reference
-        if (current == null || SystemClock.elapsedRealtimeNanos() - current.acquiredNs !in 0..1_000_000_000 || !current.stable || !sensors.stable()) {
-            toast("Hold still until orientation is available"); return
-        }
-        if (!current.lit || current.lines.size < 8) { toast("More light and visible outlines needed"); return }
-        if (patches.size >= 24) { toast("24 views captured; finish this scene"); return }
-        if (patches.any { it.forward.dot(current.pose.forward) > 0.978 }) { toast("Turn toward a new view from the same position"); return }
+        val reason = captureGuard(reference, patches)
+        if (reason != null) { toast(reason); return }
+        addReferencePatch(reference!!)
+    }
+
+    private fun captureGuard(current: Reference?, patches: List<ScenePatch>): String? = when {
+        current == null -> "No live outlines yet — hold still"
+        SystemClock.elapsedRealtimeNanos() - current.acquiredNs !in 0..1_000_000_000 -> "Reference is stale — hold still a moment"
+        !current.stable || !sensors.stable() -> "Hold still until orientation is available"
+        !current.lit || current.lines.size < 8 -> "More light and visible outlines needed"
+        patches.size >= 24 -> "24 views captured; finish this scene"
+        patches.any { it.forward.dot(current.pose.forward) > 0.978 } -> "Turn toward a new view from the same position"
+        else -> null
+    }
+
+    private fun addReferencePatch(current: Reference) {
+        val patches = draft ?: return
         patches += SceneEdges.patch(current.lines, current.pose, current.lens)
         redraw()
         refreshPanel()
+    }
+
+    /** The automatic part: while capturing, the coach grabs each view itself and offers the save. */
+    private fun maybeAutoCapture() {
+        if (!autoCapture) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastAutoPatchMs < 2000) return
+        val verdict = SceneMemoryCoach.advise(coachSnap() ?: return)
+        when {
+            verdict.captureComplete -> if (draft?.isNotEmpty() == true) { lastAutoPatchMs = now; finish() }
+            verdict.readyForCapture -> {
+                lastAutoPatchMs = now
+                val patches = draft ?: return
+                if (captureGuard(reference, patches) == null) addReferencePatch(reference!!)
+            }
+        }
+    }
+
+    private fun coachSnap(): SceneMemoryCoach.Snap? {
+        val patches = draft ?: return null
+        val current = reference
+        return SceneMemoryCoach.Snap(
+            capturing = true,
+            poseAvailable = info?.let { sensors.pose(display, it.frontFacing) } != null,
+            stable = current?.stable == true && sensors.stable(),
+            lit = current?.lit == true,
+            outlines = current?.lines?.size ?: 0,
+            views = patches.size,
+            freshReference = current != null && SystemClock.elapsedRealtimeNanos() - current.acquiredNs in 0..1_000_000_000,
+            repeatedAim = current != null && patches.any { it.forward.dot(current.pose.forward) > 0.978 }
+        )
+    }
+
+    private fun coachMessage(): String {
+        val snap = coachSnap() ?: return ""
+        return SceneMemoryCoach.advise(snap).message
     }
 
     private fun finish() {
@@ -261,26 +354,39 @@ class SceneMemoryController(
 
     private fun redraw() {
         val remembered = active
-        val camera = info
         val projection = lens
-        val pose = camera?.let { sensors.pose(display, it.frontFacing) }
-        if (!resumed || remembered == null) {
-            overlay.show(emptyList(), null, if (resumed && draft != null) "Memory capture · same position" else "", settings.vr, color)
+        val pose = info?.let { sensors.pose(display, it.frontFacing) }
+        if (!resumed) {
+            overlay.show(emptyList(), null, "", settings.vr, color)
             return
         }
         if (pose == null || projection == null) {
-            overlay.show(emptyList(), null, "Saved scene · orientation unavailable", settings.vr, color)
+            overlay.show(emptyList(), null, if (remembered != null || draft != null) "Orientation unavailable — hold the phone up" else "", settings.vr, color)
             return
         }
-        val lines = SceneEdges.projected(remembered.patches, pose, projection)
-        val matches = reference?.takeIf { SystemClock.elapsedRealtimeNanos() - it.acquiredNs in 0..1_000_000_000 }
+        val lines = remembered?.let { remembered -> SceneEdges.projected(remembered.patches, pose, projection) } ?: emptyList()
+        val matches = remembered != null && reference?.takeIf { SystemClock.elapsedRealtimeNanos() - it.acquiredNs in 0..1_000_000_000 }
             ?.takeIf { it.lines.size >= 8 }
             ?.let { frame ->
                 val live = SceneEdges.projected(listOf(SceneEdges.patch(frame.lines, frame.pose, frame.lens)), pose, projection)
                 SceneEdges.resemblance(lines, live)
             } == true
-        val state = if (matches) "Reference resembles view · position unverified" else "Saved outlines · approximate · not live"
-        overlay.show(lines, projection, state, settings.vr, color)
+        val label = when {
+            draft != null -> "Memory · ${coachMessage().ifEmpty { "hold steady" }}"
+            remembered != null -> if (matches) "Reference resembles view · position unverified" else "Saved outlines · approximate · not live"
+            else -> ""
+        }
+        val ar = buildList {
+            if (horizonOn) addAll(ArHud.horizon(pose, projection))
+            for (anchor in anchors) addAll(ArHud.marker(anchor, pose, projection)
+                .ifEmpty { listOfNotNull(ArHud.edgeTick(anchor, pose, projection)) })
+        }
+        val marks = anchors.mapNotNull { anchor ->
+            pose.project(anchor.ray, projection)
+                ?.takeIf { it.x in 0.0..1.0 && it.y in 0.0..1.0 }
+                ?.let { point -> point to anchor.label }
+        }
+        overlay.show(lines, projection, label, settings.vr, color, ar, marks)
     }
 
     private fun lens(info: CameraInfo, displayDegrees: Int): ViewLens? {

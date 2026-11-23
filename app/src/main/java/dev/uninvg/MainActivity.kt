@@ -23,6 +23,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -139,6 +140,24 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         camera = CameraEngine(this, this)
         buildUi()
+        registerThermalStatus()
+    }
+
+    /** System thermal status feeds the guardian on modern devices; battery/SoC heat covers the rest. */
+    private fun registerThermalStatus() {
+        if (Build.VERSION.SDK_INT < 29) return
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            val listener = PowerManager.OnThermalStatusChangedListener { status ->
+                runOnUiThread {
+                    statusLevel = dev.uninvg.core.ThermalPolicy.levelForStatus(status)
+                    lastThermalPollMs = 0
+                    refreshThermalGuard()
+                }
+            }
+            pm.addThermalStatusListener(listener)
+            thermalStatusListener = listener
+        } catch (_: RuntimeException) { }
     }
 
     private fun buildUi() {
@@ -584,9 +603,11 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         val caps = info.caps
         return buildString {
             appendLine("${identity.manufacturer} ${identity.model} · stream ${info.width}×${info.height}")
+            cscProbe()?.let { appendLine("CSC · $it · ${cscRegion(it)}") }
             appendLine(if (caps.manualSensor) "Manual sensor · ISO ${caps.isoMin}–${caps.isoMax}" else "No manual sensor · auto-exposure camera")
-            appendLine("Auto gain ceiling · ${info.profile.gainCeiling.toInt()}× · Denoise tune · ×${info.profile.denoiseBias}")
+            appendLine("Auto gain ceiling · ${info.profile.gainCeiling.toInt()}× · Denoise tune · ×${info.profile.denoiseBias} · Detail · ×${info.profile.sharpenBias}")
             appendLine("Temporal stack limit · ${info.profile.maxStackDepth}× · OIS preferred · ${info.profile.preferOis}")
+            if (thermalLevel > 0) appendLine("Thermal · ${if (thermalLevel == dev.uninvg.core.ThermalPolicy.HOT) "hot" else "warm"} · render pacing reduced")
         }.trimEnd()
     }
 
@@ -599,6 +620,17 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
     internal var clock: () -> Long = { android.os.SystemClock.uptimeMillis() }
 
     private fun manualTouched() { lastManualTouchMs = clock() }
+
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    internal var thermalLevel = 0
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    internal var socProbe: () -> Int? = { socTemperatureTenths() }
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    internal var cscProbe: () -> String? = { cscSalesCode() }
+    private var statusLevel = 0
+    private var lastThermalPollMs = 0L
+    private var lastBatteryTempTenths: Int? = null
+    private var thermalStatusListener: Any? = null
 
     @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
     internal fun forcedProfile(): ProfileId? =
@@ -641,6 +673,9 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
 
     override fun onDestroy() {
         settingsDialog?.dismiss()
+        (thermalStatusListener as? PowerManager.OnThermalStatusChangedListener)?.let { listener ->
+            runCatching { (getSystemService(POWER_SERVICE) as PowerManager).removeThermalStatusListener(listener) }
+        }
         camera.release()
         memory.release()
         analysis.shutdownNow()
@@ -717,6 +752,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         configureCameraSource(info)
         renderer.setProfile(info.profile.maxStackDepth, info.profile.motionThreshold)
         renderer.setDenoiseBias(info.profile.denoiseBias)
+        renderer.setDetailBias(info.profile.sharpenBias)
         if (settings.stackDepth > info.profile.maxStackDepth) settings = settings.copy(stackDepth = info.profile.maxStackDepth)
         exposureProduct = 10_000_000L.coerceIn(info.caps.exposureMinNs, info.caps.exposureMaxNs).toDouble() * info.caps.isoMin
         camera.update(settings, if (settings.automatic) exposureProduct else manualExposure())
@@ -835,6 +871,53 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         placeholder.visibility = View.GONE
     }
 
+    /** The thermal guardian: battery heat from 40 °C, SoC heat (CPU zone, GPU fallback) from 60 °C. Pacing only — exposure never. */
+    internal fun refreshThermalGuard(force: Boolean = false) {
+        if (!force && clock() - lastThermalPollMs < 5_000) return
+        lastThermalPollMs = clock()
+        io.execute {
+            val soc = runCatching { socProbe() }.getOrNull()
+            main.post {
+                if (!resumed) return@post
+                val level = dev.uninvg.core.ThermalPolicy.effective(statusLevel, lastBatteryTempTenths, soc)
+                if (level == thermalLevel) return@post
+                thermalLevel = level
+                renderer.setThermalLoad(level)
+                if (settingsDialog?.isShowing == true && selectedTab == 5) showTab(5)
+            }
+        }
+    }
+
+    /** Highest CPU thermal-zone reading (millidegrees→tenths); GPU zones only when no CPU zone answers. */
+    internal fun socTemperatureTenths(): Int? {
+        val zones = java.io.File("/sys/class/thermal").listFiles { file -> file.name.startsWith("thermal_zone") } ?: return null
+        var cpu: Int? = null
+        var gpu: Int? = null
+        for (zone in zones) {
+            val type = runCatching { java.io.File(zone, "type").readText().trim().lowercase() }.getOrNull() ?: continue
+            val milli = runCatching { java.io.File(zone, "temp").readText().trim().toInt() }.getOrNull() ?: continue
+            val tenths = milli / 100
+            if (tenths !in 100..1_200) continue
+            if (type.contains("cpu")) { if (tenths > (cpu ?: Int.MIN_VALUE)) cpu = tenths }
+            else if (type.contains("gpu")) { if (tenths > (gpu ?: Int.MIN_VALUE)) gpu = tenths }
+        }
+        return cpu ?: gpu
+    }
+
+    /** Samsung region firmware code (ILO = Israel) from the sales-code system properties. */
+    internal fun cscSalesCode(): String? = try {
+        val get = Class.forName("android.os.SystemProperties").getMethod("get", String::class.java)
+        listOf("ro.omc.sales_code", "ro.csc.sales_code", "persist.omc.sales_code")
+            .map { (get.invoke(null, it) as String).trim().uppercase(java.util.Locale.ROOT) }
+            .firstOrNull { it.length in 2..4 && !it.contains("unknown", ignoreCase = true) }
+    } catch (_: Exception) { null }
+
+    private fun cscRegion(code: String): String = mapOf(
+        "ILO" to "Israel", "INS" to "India", "DBT" to "Germany", "BTU" to "United Kingdom",
+        "XAA" to "USA (unlocked)", "XSA" to "Australia", "KOO" to "South Korea",
+        "TGY" to "Hong Kong", "ZTO" to "Brazil", "XME" to "Malaysia"
+    ).getOrDefault(code, "region $code")
+
     private fun updateStatus() {
         val fps = if (smoothedFps > 0) String.format(Locale.US, "%.1f", smoothedFps) else "—"
         val iso = measured?.iso?.toString() ?: "—"
@@ -842,6 +925,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         status.text = "$fps fps / ${fpsLabel(settings.fps)} target   ·   ISO $iso   ·   $exposure"
         sceneLabel.text = (if (settings.automatic) scene.label else "Manual") + if (settings.regional) " · REGIONAL" else ""
         refreshDeviceInfo()
+        refreshThermalGuard()
     }
 
     @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
@@ -850,6 +934,7 @@ class MainActivity : Activity(), CameraEngine.Listener, NightRenderer.Listener {
         val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         val temperature = battery?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+        lastBatteryTempTenths = temperature.takeIf { it != Int.MIN_VALUE }
         val percent = if (level >= 0 && scale > 0) level * 100 / scale else null
         val line = HudFormat.batteryLine(percent, if (temperature != Int.MIN_VALUE) temperature else null)
         if (line == null) {

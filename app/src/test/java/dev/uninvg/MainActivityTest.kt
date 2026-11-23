@@ -105,6 +105,41 @@ class MainActivityTest {
         }
     }
 
+    @Test fun thermalGuardFollowsBatteryAndSiliconHeat() {
+        activity.socProbe = { 590 }
+        activity.sendStickyBroadcast(Intent(Intent.ACTION_BATTERY_CHANGED).apply {
+            putExtra(BatteryManager.EXTRA_LEVEL, 87)
+            putExtra(BatteryManager.EXTRA_SCALE, 100)
+            putExtra(BatteryManager.EXTRA_TEMPERATURE, 410)
+        })
+        activity.refreshDeviceInfo()
+        activity.refreshThermalGuard(true)
+        eventually { activity.thermalLevel == dev.uninvg.core.ThermalPolicy.WARM }
+        activity.socProbe = { 700 }
+        activity.refreshThermalGuard(true)
+        eventually { activity.thermalLevel == dev.uninvg.core.ThermalPolicy.HOT }
+        activity.socProbe = { null }
+        activity.sendStickyBroadcast(Intent(Intent.ACTION_BATTERY_CHANGED).apply {
+            putExtra(BatteryManager.EXTRA_LEVEL, 87)
+            putExtra(BatteryManager.EXTRA_SCALE, 100)
+            putExtra(BatteryManager.EXTRA_TEMPERATURE, 300)
+        })
+        activity.refreshDeviceInfo()
+        activity.refreshThermalGuard(true)
+        eventually { activity.thermalLevel == dev.uninvg.core.ThermalPolicy.NORMAL }
+    }
+
+    @Test fun deviceTabSurfacesCscAndDetailTuning() {
+        activity.onReady(cameraInfo(true))
+        activity.cscProbe = { "ILO" }
+        gear().performClick()
+        button("Device").performClick()
+        eventually {
+            views().filterIsInstance<TextView>().any { it.text.contains("CSC · ILO · Israel") } &&
+            views().filterIsInstance<TextView>().any { it.text.contains("Detail · ×1.15") }
+        }
+    }
+
     @Test fun cardboardSplitIsLandscapeOnlyWhileEnabled() {
         gear().performClick(); button("Display").performClick()
         val toggle = views().filterIsInstance<Switch>().single { it.text == "Cardboard split view" }
@@ -210,13 +245,13 @@ class MainActivityTest {
 
     @Test fun versionPickerLetsTheUserBrowseAndPickEarlierReleases() {
         activity.updateCatalogFetcher = { listOf(
-            AppUpdate.ReleaseInfo("0.6.5", "https://example.com/UniNVG-0.6.5.apk"),
+            AppUpdate.ReleaseInfo("0.7.0", "https://example.com/UniNVG-0.7.0.apk"),
             AppUpdate.ReleaseInfo("0.3.0", "https://example.com/UniNVG-0.3.0.apk")) }
         gear().performClick()
         button("Update").performClick()
         button("Browse versions").performClick()
         eventually { views().filterIsInstance<TextView>().map { it.text.toString() }
-            .let { items -> items.any { it.startsWith("v0.6.5") && it.contains("installed") } &&
+            .let { items -> items.any { it.startsWith("v0.7.0") && it.contains("installed") } &&
                 items.any { it.startsWith("v0.3.0") && it.contains("older") } } }
     }
 

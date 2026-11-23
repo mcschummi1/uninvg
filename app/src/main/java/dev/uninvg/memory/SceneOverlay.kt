@@ -11,18 +11,23 @@ import kotlin.math.max
 class SceneOverlay(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private var lines = emptyList<ImageLine>()
+    private var arLines = emptyList<ImageLine>()
+    private var arLabels = emptyList<Pair<Point2, String>>()
     private var lens: ViewLens? = null
     private var label = ""
     private var split = false
     private var color = Color.GREEN
 
-    fun show(lines: List<ImageLine>, lens: ViewLens?, label: String, split: Boolean, color: Int) {
+    fun show(lines: List<ImageLine>, lens: ViewLens?, label: String, split: Boolean, color: Int,
+             arLines: List<ImageLine> = emptyList(), arLabels: List<Pair<Point2, String>> = emptyList()) {
         this.lines = lines
+        this.arLines = arLines
+        this.arLabels = arLabels
         this.lens = lens
         this.label = label
         this.split = split
         this.color = color
-        visibility = if (label.isEmpty()) GONE else VISIBLE
+        visibility = if (label.isEmpty() && arLines.isEmpty()) GONE else VISIBLE
         contentDescription = label
         invalidate()
     }
@@ -48,6 +53,27 @@ class SceneOverlay(context: Context) : View(context) {
                 offsetX + line.a.x.toFloat() * scaledWidth, offsetY + (1 - line.a.y).toFloat() * scaledHeight,
                 offsetX + line.b.x.toFloat() * scaledWidth, offsetY + (1 - line.b.y).toFloat() * scaledHeight, paint
             )
+            paint.pathEffect = null
+            paint.alpha = 200
+            paint.strokeWidth = density * 1.6f
+            for (line in arLines) canvas.drawLine(
+                offsetX + line.a.x.toFloat() * scaledWidth, offsetY + (1 - line.a.y).toFloat() * scaledHeight,
+                offsetX + line.b.x.toFloat() * scaledWidth, offsetY + (1 - line.b.y).toFloat() * scaledHeight, paint
+            )
+            if (arLabels.isNotEmpty()) {
+                paint.style = Paint.Style.FILL
+                paint.alpha = 230
+                paint.textSize = 10f * density
+                paint.setShadowLayer(2f * density, 0f, 0f, Color.BLACK)
+                for ((point, mark) in arLabels) canvas.drawText(
+                    mark,
+                    offsetX + point.x.toFloat() * scaledWidth + 6f * density,
+                    offsetY + (1 - point.y).toFloat() * scaledHeight - 4f * density,
+                    paint
+                )
+                paint.clearShadowLayer()
+                paint.style = Paint.Style.STROKE
+            }
             canvas.restore()
         }
         if (split) {
@@ -58,6 +84,7 @@ class SceneOverlay(context: Context) : View(context) {
         } else drawEye(0f, width.toFloat())
         paint.pathEffect = null
         paint.alpha = 255
+        paint.strokeWidth = density
         paint.style = Paint.Style.FILL
         paint.textSize = 11f * density
         val x = 12f * density

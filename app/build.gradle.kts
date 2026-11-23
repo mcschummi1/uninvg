@@ -16,8 +16,8 @@ android {
         applicationId = "dev.uninvg"
         minSdk = 24
         targetSdk = 35
-        versionCode = (project.findProperty("appVersionCode") as String?)?.toInt() ?: 60500
-        versionName = (project.findProperty("appVersionName") as String?) ?: "0.6.5"
+        versionCode = (project.findProperty("appVersionCode") as String?)?.toInt() ?: 70000
+        versionName = (project.findProperty("appVersionName") as String?) ?: "0.7.0"
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }
 
