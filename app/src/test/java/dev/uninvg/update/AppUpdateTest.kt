@@ -69,6 +69,41 @@ class AppUpdateTest {
         assertEquals("https://example.com/UniNVG-0.4.0.apk", releases[1].apkUrl)
     }
 
+    @Test fun releaseBodyBecomesPlainUpdateNotes() {
+        val json = """
+            {
+              "tag_name": "v0.7.0.5",
+              "body": "## What's new\n- Faster rendering\n- **50 fps** option\nDocs: [guide](https://example.com)",
+              "assets": [ { "browser_download_url": "https://example.com/UniNVG-0.7.0.5.apk" } ]
+            }
+        """.trimIndent()
+        val release = AppUpdate.parseRelease(json)
+        assertEquals("0.7.0.5", release?.tag)
+        val notes = release?.notes.orEmpty()
+        assertTrue(notes, notes.contains("• Faster rendering"))
+        assertTrue(notes, notes.contains("• 50 fps option"))
+        assertTrue(notes, notes.contains("Docs: guide"))
+        assertFalse(notes, notes.contains("#"))
+        assertFalse(notes, notes.contains("- "))
+    }
+
+    @Test fun everyCatalogVersionCarriesItsOwnUpdateLog() {
+        val json = """
+            [
+              { "tag_name": "v0.7.0", "body": "Thermal guardian\n- Heat pacing", "assets": [ { "browser_download_url": "https://example.com/UniNVG-0.7.0.apk" } ] },
+              { "tag_name": "v0.6.5", "body": "Landscape-only cardboard", "assets": [ { "browser_download_url": "https://example.com/UniNVG-0.6.5.apk" } ] }
+            ]
+        """.trimIndent()
+        val releases = AppUpdate.parseReleases(json)
+        assertTrue(releases[0].notes.orEmpty().contains("Heat pacing"))
+        assertTrue(releases[1].notes.orEmpty().contains("Landscape-only cardboard"))
+    }
+
+    @Test fun emptyOrBrokenBodiesYieldNoNotes() {
+        assertTrue(AppUpdate.parseRelease("""{"tag_name":"v1","assets":[{"browser_download_url":"a.apk"}],"body":""}""")?.notes == null)
+        assertTrue(AppUpdate.parseRelease("""{"tag_name":"v1","assets":[{"browser_download_url":"a.apk"}]}""")?.notes == null)
+    }
+
     @Test fun emptyOrBrokenCatalogsAreEmpty() {
         assertTrue(AppUpdate.parseReleases("").isEmpty())
         assertTrue(AppUpdate.parseReleases("[]").isEmpty())

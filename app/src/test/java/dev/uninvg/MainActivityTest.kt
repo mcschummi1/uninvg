@@ -85,8 +85,8 @@ class MainActivityTest {
 
     @Test fun everyRequestedFrameRatePersistsIncludingFractionalCadence() {
         gear().performClick(); button("Capture").performClick()
-        val labels = listOf("120", "90", "60", "40", "30", "25", "24", "15", "10", "5", "1", "1/2", "1/4")
-        val values = listOf(120f, 90f, 60f, 40f, 30f, 25f, 24f, 15f, 10f, 5f, 1f, 0.5f, 0.25f)
+        val labels = listOf("120", "90", "60", "50", "40", "30", "25", "24", "15", "10", "5", "1", "1/2", "1/4")
+        val values = listOf(120f, 90f, 60f, 50f, 40f, 30f, 25f, 24f, 15f, 10f, 5f, 1f, 0.5f, 0.25f)
         labels.forEachIndexed { index, label ->
             button(label).performClick()
             assertEquals(values[index], preferences().getFloat("fps", 0f), 0f)
@@ -233,7 +233,8 @@ class MainActivityTest {
     }
 
     @Test fun updateTabChecksGitHubAndOffersTheNewerReleaseDownload() {
-        activity.updateFetcher = { AppUpdate.ReleaseInfo("9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk") }
+        activity.updateFetcher = { AppUpdate.ReleaseInfo("9.9.9", "https://github.com/mcschummi1/uninvg/releases/download/v9.9.9/UniNVG-v9.9.9.apk",
+            "• Sharper night view\n• 50 fps cadence") }
         gear().performClick()
         button("Update").performClick()
         assertTrue(views().filterIsInstance<TextView>().any { it.text.toString().contains("Installed · v") })
@@ -241,18 +242,20 @@ class MainActivityTest {
         button("Check for updates").performClick()
         eventually { views().filterIsInstance<TextView>().any { it.text.toString().contains("Update v9.9.9 is available") } }
         assertNotNull(button("Download v9.9.9 & install"))
+        assertTrue(views().filterIsInstance<TextView>().any { it.text.toString().contains("What's new in v9.9.9") })
+        assertTrue(views().filterIsInstance<TextView>().any { it.text.toString().contains("Sharper night view") })
     }
 
     @Test fun versionPickerLetsTheUserBrowseAndPickEarlierReleases() {
         activity.updateCatalogFetcher = { listOf(
-            AppUpdate.ReleaseInfo("0.7.0", "https://example.com/UniNVG-0.7.0.apk"),
-            AppUpdate.ReleaseInfo("0.3.0", "https://example.com/UniNVG-0.3.0.apk")) }
+            AppUpdate.ReleaseInfo("0.7.0.5", "https://example.com/UniNVG-0.7.0.5.apk"),
+            AppUpdate.ReleaseInfo("0.3.0", "https://example.com/UniNVG-0.3.0.apk", "• Memory fix from the 0.3 era")) }
         gear().performClick()
         button("Update").performClick()
         button("Browse versions").performClick()
         eventually { views().filterIsInstance<TextView>().map { it.text.toString() }
-            .let { items -> items.any { it.startsWith("v0.7.0") && it.contains("installed") } &&
-                items.any { it.startsWith("v0.3.0") && it.contains("older") } } }
+            .let { items -> items.any { it.startsWith("v0.7.0.5") && it.contains("installed") } &&
+                items.any { it.startsWith("v0.3.0") && it.contains("older") && it.contains("Memory fix") } } }
     }
 
     @Test fun deviceTabPinsDedicatedProfilesAndExposureStaysAdaptive() {

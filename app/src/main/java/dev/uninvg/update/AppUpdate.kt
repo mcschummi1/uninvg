@@ -10,7 +10,7 @@ object AppUpdate {
     const val LATEST_RELEASE_URL = "https://api.github.com/repos/$REPO/releases/latest"
     const val RELEASES_URL = "https://api.github.com/repos/$REPO/releases?per_page=30"
 
-    data class ReleaseInfo(val tag: String, val apkUrl: String)
+    data class ReleaseInfo(val tag: String, val apkUrl: String, val notes: String? = null)
 
     fun normalize(tag: String) = tag.trim().removePrefix("v")
 
@@ -29,7 +29,35 @@ object AppUpdate {
         val tag = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"").find(json)?.groupValues?.get(1) ?: return null
         val apk = Regex("\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"").find(json)
             ?.groupValues?.get(1) ?: return null
-        return ReleaseInfo(normalize(tag), apk)
+        return ReleaseInfo(normalize(tag), apk, releaseNotes(json))
+    }
+
+    /** Release body of the response returned as plain text; markdown stripped, capped before it turns into a wall. */
+    fun releaseNotes(json: String, maxChars: Int = 260): String? {
+        val raw = Regex("\"body\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").find(json)?.groupValues?.get(1) ?: return null
+        return summarizeNotes(raw, maxChars)
+    }
+
+    private fun summarizeNotes(raw: String, maxChars: Int): String? {
+        if (raw.isBlank()) return null
+        val unescaped = raw
+            .replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", " ")
+            .replace("\\\"", "\"").replace("\\\\", "\\")
+        val plain = unescaped.lines()
+            .mapNotNull { line ->
+                val stripped = line
+                    .replace(Regex("^\\s*#{1,6}\\s*"), "")
+                    .replace(Regex("^\\s*[-*+]\\s+"), "• ")
+                    .replace(Regex("!\\[[^\\]]*\\]\\([^)]*\\)"), "")
+                    .replace(Regex("\\[([^\\]]*)\\]\\([^)]*\\)"), "$1")
+                    .replace("*", "").replace("`", "")
+                    .trim()
+                stripped.ifEmpty { null }
+            }
+            .joinToString("\n")
+        val excerpt = plain.take(maxChars).trimEnd()
+        if (excerpt.isBlank()) return null
+        return if (plain.length > maxChars) "$excerpt…" else excerpt
     }
 
     fun fetchLatest(timeoutMs: Int = 8_000): ReleaseInfo? = parseRelease(fetchJson(LATEST_RELEASE_URL, timeoutMs))
@@ -41,29 +69,33 @@ object AppUpdate {
     }
 
     fun parseReleases(json: String): List<ReleaseInfo> {
-        val pattern = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"|\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"")
+        val pattern = Regex("\"tag_name\"\\s*:\\s*\"([^\"]+)\"|\"browser_download_url\"\\s*:\\s*\"([^\"]+\\.apk)\"|\"body\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
         val releases = mutableListOf<ReleaseInfo>()
         var tag: String? = null
         var apk: String? = null
+        var body: String? = null
         fun flush() {
             val currentTag = tag
             val currentApk = apk
-            if (currentTag != null && currentApk != null) releases.add(ReleaseInfo(normalize(currentTag), currentApk))
+            val currentBody = body ?: ""
+            if (currentTag != null && currentApk != null) releases.add(ReleaseInfo(normalize(currentTag), currentApk, summarizeNotes(currentBody, 260)))
             tag = null
             apk = null
+            body = null
         }
         for (match in pattern.findAll(json)) {
             val tagValue = match.groupValues[1]
             val apkValue = match.groupValues[2]
+            val bodyValue = match.groupValues[3]
             if (tagValue.isNotEmpty()) {
                 flush()
                 tag = tagValue
             } else if (apkValue.isNotEmpty() && apk == null) apk = apkValue
+            else if (bodyValue.isNotEmpty() && body == null) body = bodyValue
         }
         flush()
         return releases
     }
-
     private fun fetchJson(url: String, timeoutMs: Int): String {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
