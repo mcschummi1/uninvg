@@ -109,13 +109,13 @@ class MainActivityTest {
         gear().performClick(); button("Display").performClick()
         val toggle = views().filterIsInstance<Switch>().single { it.text == "Cardboard split view" }
         assertFalse(toggle.isChecked)
-        assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, shadowOf(activity).getRequestedOrientation())
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.requestedOrientation)
         toggle.performClick()
         assertTrue(preferences().getBoolean("vr", false))
-        assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, shadowOf(activity).getRequestedOrientation())
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, activity.requestedOrientation)
         toggle.performClick()
         assertFalse(toggle.isChecked)
-        assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, shadowOf(activity).getRequestedOrientation())
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED, activity.requestedOrientation)
     }
 
     @Test fun hudContrastTracksEveryPhosphorChoice() {
