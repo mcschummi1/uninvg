@@ -1,5 +1,7 @@
 package dev.uninvg.core
 
+import kotlin.math.min
+
 /**
  * Turns thermal pressure into smoothness-first render limits.
  * Pure pacing/quality trade-offs only — exposure and every light-affecting control stay adaptive.

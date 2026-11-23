@@ -33,8 +33,8 @@ object ArHud {
 
     /** Border pointer for an anchor not currently in view: the view-basis direction is the shortest turn. */
     fun edgeTick(anchor: ArAnchor, pose: ViewPose, lens: ViewLens): ImageLine? {
-        val dx = pose.right.dot(anchor.ray)
-        val dy = pose.up.dot(anchor.ray)
+        var dx = pose.right.dot(anchor.ray)
+        var dy = pose.up.dot(anchor.ray)
         val length = hypot(dx, dy)
         if (length < 1e-6) return null
         dx /= length; dy /= length
